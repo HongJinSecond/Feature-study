@@ -1,7 +1,4 @@
 # How to run this project
-Writen by Zuowei Chen 2024-10-30
-
-e-mail: 2021113561@stu.hit.edu.cn
 
 ## Structure
 ### ./results

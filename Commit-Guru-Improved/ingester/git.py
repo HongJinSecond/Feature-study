@@ -51,7 +51,6 @@ class Git():
 
     def getCommitStatsProperties(stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp ):
         """
-        this is the file track part  ---Zuowei Chen 2024/10/13
 
 
         getCommitStatsProperties

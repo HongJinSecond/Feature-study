@@ -3,9 +3,6 @@
 
 # CommitGuru - Improved
 ==========================================
-Update by Zuowei Chen
-2024/11/5
-2021113561@stu.hit.edu.cn
 
 Ingests and analyzes code repositories.
 
@@ -143,7 +140,7 @@ Set up the database for the first time by running `python script.py initDb`
 In a terminal, type `nohup python script.py & ' to start the code repo analyzer and run it in the background.
 
 ## OFFLine
-Update by Zuowei Chen 2024-10-28
+Update 2024-10-28
 I have found if we once use the script.py to extract datasets, everytime it will use **git clone** to clone the project. However, the clone process may be interrupted due to the network problem and we need restart this tool again, which is very hassle and waste of time, so I have integrates a offline version of this tool, the usage can be seen below:
 ```
 python script.py initDb

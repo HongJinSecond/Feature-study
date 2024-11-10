@@ -1,12 +1,6 @@
 import copy
 class Commit:
-    """
-    update by Zuowei Chen 2024-10
-    
-    2021113561@stu.hit.edu.cn
 
-    """
-    
     def __init__(self) -> None:
         self.hash_code=''
         self.parent_hash=None
@@ -33,9 +27,6 @@ class Commit:
         
     
     def update_dict(self,file_dict:dict):
-    """
-    pass the file dictionary to its child node.
-    """
         if self.copy_count==len(self.followCommit):
             file_dict.clear()
             return

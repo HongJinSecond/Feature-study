@@ -12,7 +12,3 @@ This project is our proposed improved tool to extract the datasets of a software
 ## empirical study
 
 This project is our experiment project to answer our RQs about the feature issue. Please check "./empirical study/README.md to get the information".
-
-
-2024/11/5 Zuowei Chen
-2021113561@stu.hit.edu.cn
