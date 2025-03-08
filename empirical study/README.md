@@ -37,6 +37,8 @@ This folder contains all the datasets we use.
 
 **old** means the datasets extracted by the old _Commit Guru._
 
+**manul**  is the experimental data that we conduct manual checking tests.
+
 ### ./data_stream
 
 This folder contains the function which transform the datasets into stream data for online learing models.
@@ -69,7 +71,11 @@ This folder contains the function which transform the datasets into stream data 
 
 see requirements.txt
 
+PYTHON=3.6
+
+pip install -r requirements.txt
+
 ## Epilogue
 
-Have a good time to use our code!
+Enjoy yourself!
 
