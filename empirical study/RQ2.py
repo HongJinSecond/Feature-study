@@ -194,7 +194,7 @@ if __name__=="__main__":
     idx.append("avg")
     os.makedirs(performance_path_new, exist_ok=True)
     os.makedirs(performance_path_old, exist_ok=True)
-    for i in range(18,23,1):
+    for i in range(1,23,1):
         dataset=data_id_2name(i)
         print(f"--------calculate for {dataset}----------")
         #create the output source
