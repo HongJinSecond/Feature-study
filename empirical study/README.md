@@ -65,7 +65,9 @@ This folder contains the function which transform the datasets into stream data 
 <li>Check Result</li>
 </ol>
 
+### Addtion
 
+pvalue_adjustment.ipynb: This is an additional experiment in reference to the reviewers' comments. The results can be checked in **results/RQ2/performance/adjustment**
 
 ## Dependency
 

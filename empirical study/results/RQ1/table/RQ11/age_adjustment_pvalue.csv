@@ -1,0 +1,23 @@
+,original p-value,after Benjamini adjustment,Original Reject,New reject,Is same
+brackets,3.9298318042387014e-259,2.9008550588418914e-258,True,True,True
+BroadleafCommerce,0.0,0.0,True,True,True
+camel,8.294492450328001e-120,5.180733062068848e-119,True,True,True
+corefx-v-6.2,0.0,0.0,True,True,True
+django,9.691307337362015e-26,4.371742898436665e-25,True,True,True
+elasticsearch,0.0,0.0,True,True,True
+fabric8,3.857676186005264e-06,1.491596059103948e-05,True,True,True
+godot,0.0,0.0,True,True,True
+vscode,0.0,0.0,True,True,True
+pytorch,1.6984732066890999e-49,8.112496656501023e-49,True,True,True
+spring-boot,0.0,0.0,True,True,True
+node,2.5375733778558235e-118,1.4717543415753955e-117,True,True,True
+nova,0.0,0.0,True,True,True
+tomcat,1.3680108380011464e-08,5.553979780069016e-08,True,True,True
+pandas,2.1067715319665505e-78,1.1404360418531947e-77,True,True,True
+security,5.482135081018755e-66,2.782111309519434e-65,True,True,True
+rails,0.0,0.0,True,True,True
+rust,0.0,0.0,True,True,True
+wp-calypso,5.497213492739719e-222,3.7196845396841053e-221,True,True,True
+npm,8.209114638578887e-11,3.508225261966474e-10,True,True,True
+Mybatis3,0.004562197600775654,0.016838219355052243,True,True,True
+tensorflow,0.0,0.0,True,True,True
