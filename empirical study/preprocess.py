@@ -23,6 +23,34 @@ old_issue_path=os.path.join(data_issue_path,"old")
 #the features u will maintain to train your model
 keep_dim=['author_date_unix_timestamp','fix','ns','nd','nf','entrophy','la','ld','lt','ndev','age','nuc','exp','rexp','sexp','contains_bug','days_to_first_fix']
 
+# ONE_DAY_HAS_TIMESTAMPS = 86400  # timestamps for one day
+# 将天数和时间戳转换
+# def cvt_day2timestamp(days: float) -> float:
+#     """
+#     This method is used to convert the days to the value of timestamps.
+
+#     Args:
+#         days (float, list or tuple): The value of the days.
+
+#     Returns:
+#         day2timestamp_list (the same as days): The converted timestamps.
+#     """
+#     days_np = np.array(days)  # force to numpy data
+#     day2timestamp_list = (days_np * ONE_DAY_HAS_TIMESTAMPS).tolist()
+#     return day2timestamp_list
+# def cvt_timestamp2day(timestamps):
+#     """
+#     This method is used to convert the value of timestampsthe to days.
+
+#     Args:
+#         timestamps (float, list or tuple): The value of timestamps.
+
+#     Returns:
+#         days_list (the same as timestamps): The converted days.
+#     """
+#     timestamps_np = np.array(timestamps)
+#     days_list = (timestamps_np / ONE_DAY_HAS_TIMESTAMPS).tolist()
+#     return days_list
 
 def time_stamp_preprocess(data:pd.DataFrame):
     '''
@@ -77,22 +105,12 @@ if __name__=="__main__":
 
         new_data=pd.read_csv(os.path.join(new_data_path,input_file_name))
         old_data=pd.read_csv(os.path.join(old_data_path,input_file_name))
-        #使用新数据集的标签 Only run when u use the dataset at the first time
-        for i in range(len(new_data)):
-            assert old_data.at[i, 'commit_hash'] == new_data.at[i, 'commit_hash'],f"{input_file_name} 序号不匹配"
-            old_data.at[i, 'contains_bug'] = new_data.at[i, 'contains_bug']
-            old_data.at[i, 'unix_timestamp_first_fix'] = new_data.at[i, 'unix_timestamp_first_fix']
-
-        new_data.to_csv(os.path.join(new_data_path,input_file_name),index=False)
-        old_data.to_csv(os.path.join(old_data_path,input_file_name),index=False)
-
 
         #delete the nearlist half-year data
         new_data=time_stamp_preprocess(new_data)
         old_data=time_stamp_preprocess(old_data)
         #
         #可以在此部分加入一些其他预处理操作
-
 
         #进行数据的转换
         new_data['fix']=new_data['fix'].astype(int)
@@ -110,6 +128,7 @@ if __name__=="__main__":
         invalid_data_preprocess(new_data)
         invalid_data_preprocess(old_data)
 
+        #输出预处理后的数据
         out_put_file_name=name+"_vld_st.csv"
         new_data[keep_dim].to_csv(os.path.join(new_issue_path,out_put_file_name),index=False)
         old_data[keep_dim].to_csv(os.path.join(old_issue_path,out_put_file_name),index=False)
