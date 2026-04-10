@@ -87,6 +87,8 @@ def plot_kendall():
         plt.scatter(np.full(data.shape,positions[i]),data)
     plt.xticks(positions,["R0", "R1", "G-mean", "MCC", "Precision", "F1- score", "ACC"])
     plt.savefig(os.path.join(plot_dir,'RQ3_Kendall.png'),dpi=350)
+    plt.savefig(os.path.join(plot_dir,'RQ3_Kendall.pdf'),bbox_inches='tight')
+
     # plt.show()
 
 def plot_Rank(metric="avg_Gmean",type="new"):
@@ -124,6 +126,7 @@ def plot_Rank(metric="avg_Gmean",type="new"):
     plt.ylabel('Rank Score', fontweight='bold')
     plt.tight_layout()  #
     plt.savefig(os.path.join(plot_dir, f'Rank_Score_{metric}_{type}.png'), dpi=350)
+    plt.savefig(os.path.join(plot_dir, f'Rank_Score_{metric}_{type}.pdf'), bbox_inches='tight')
     plt.show()
 
 
