@@ -1,7 +1,5 @@
 """
 file: readRepo.py
-authors: Ben Grawi <bjg1568@rit.edu>, Christoffer Rosen <cbr4830@rit.edu>
-date: October 2013
 description: This module contains the functions for ingesting a repository with
              a given id. 
 """

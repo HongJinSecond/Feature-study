@@ -1,7 +1,5 @@
 """
 file: bugfinder.py
-author: Christoffer Rosen <cbr4830@rit.edu>
-date: November 2013
 description: Links changes that introduces bugs by identifying changes
 that fix problems.
 """

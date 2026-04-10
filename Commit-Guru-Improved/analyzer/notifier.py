@@ -1,7 +1,5 @@
 """
 file: notifier.py 
-author: Christoffer Rosen <cbr4830@rit.edu>
-date: December, 2013
 description: Notification system using gmail to notify subscribers that
 a repo's analysis has been completed. 
 """

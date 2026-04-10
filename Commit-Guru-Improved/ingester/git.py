@@ -12,8 +12,6 @@ import gc
 import copy
 """
 file: repository.py
-authors: Ben Grawi <bjg1568@rit.edu>, Christoffer Rosen <cbr4830@rit.edu>
-date: October 2013
 description: Holds the repository git abstraction class
 """
 
@@ -49,8 +47,9 @@ class Git():
 
     REPO_DIRECTORY = os.path.join("CASRepos","git")        # directory in which to store repositories
 
-    def getCommitStatsProperties(stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp ):
+    def getCommitStatsProperties(self,stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp ):
         """
+        this is the file track part  ---Zuowei Chen 2024/10/13
 
 
         getCommitStatsProperties
@@ -289,7 +288,7 @@ class Git():
 
         #print('"'+repr(subprocess.check_output(cmd + self.LOG_FORMAT, shell=True, cwd = repo_dir ))[14180025:14180030]+'"')
         #print( subprocess.check_output(cmd + self.LOG_FORMAT, shell=True, cwd = repo_dir ))
-        log = str( subprocess.check_output(cmd + self.LOG_FORMAT, shell=True, cwd = repo_dir ).decode("utf-8") ) # <---le using utf8 for the git log results, so that we can handle Chinese and other characters
+        log = str( subprocess.check_output(cmd + self.LOG_FORMAT, shell=True, cwd = repo_dir ).decode("utf-8",errors="replace") ) # <---le using utf8 for the git log results, so that we can handle Chinese and other characters
         #log = log[2:-1]   # Remove head/end clutter
         #print(log)
 
@@ -310,11 +309,11 @@ class Git():
         
         print('-----Stats check over-----')
         sizee=len(commitList)
-        print(f"The number of commits is {sizee}")
+        print(f"当前项目的提交数量为：{sizee}")
         print('-----Starting feature extracttion-----')
         kill_count=0
         for commit in commitList:
-            print(f"Extract for the {times} item,Current progress is {(times/sizee)*100}%")
+            print(f"处理第{times}项,当前进度{(times/sizee)*100}%")
             times+=1
             author = ""                                 # author of commit
             unixTimeStamp = 0                           # timestamp of commit

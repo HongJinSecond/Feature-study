@@ -1,7 +1,5 @@
 """
 file: Analyzer.py
-author: Christoffer Rosen <cbr4830@rit.edu>
-date: November 2013
 description: This module contains the functions for analyzing a repo with a given id.
 Currently only supports the GitHub Issue Tracker.
 """

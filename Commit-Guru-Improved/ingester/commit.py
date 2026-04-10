@@ -1,6 +1,6 @@
 import copy
-class Commit:
 
+class Commit:
     def __init__(self) -> None:
         self.hash_code=''
         self.parent_hash=None
@@ -27,6 +27,9 @@ class Commit:
         
     
     def update_dict(self,file_dict:dict):
+        """
+        pass the file dictionary to its child node.
+        """
         if self.copy_count==len(self.followCommit):
             file_dict.clear()
             return

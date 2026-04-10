@@ -1,7 +1,5 @@
 """
 file: commit.py
-author: Ben Grawi <bjg1568@rit.edu>, Christoffer Rosen <cbr4830@rit.edu>
-date: Novemeber 2013
 description: Holds the commit abstraction class and ORM
 """
 from db import *

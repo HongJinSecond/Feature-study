@@ -1,7 +1,5 @@
 """
 file: cas_manager.py
-authors: Christoffer Rosen <cbr4830@rit.edu>
-date: Jan. 2014
 description: This module contains the CAS_manager class, which is a thread that continously checks if there
 			 is work that needs to be done. Also contains supporting classes of Worker and ThreadPool used by
 			 the CAS_Manager.

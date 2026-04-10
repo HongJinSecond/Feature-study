@@ -1,7 +1,5 @@
 """
 file: localrepository.py
-author: Ben Grawi <bjg1568@rit.edu>
-date: October 2013
 description: Holds the repository abstraction class
 """
 from ingester.git import *

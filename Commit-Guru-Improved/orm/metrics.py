@@ -1,7 +1,5 @@
 """
 file: metrics.py
-author: Christoffer Rosen <cbr4830@rit.edu>
-date: November 2013
 description: Holds the metrics abstraction class and ORM
 """
 from db import *

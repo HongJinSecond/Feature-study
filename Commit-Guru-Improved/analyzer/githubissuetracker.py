@@ -1,7 +1,5 @@
 """
 file: gitissuetracker.py
-author: Christoffer Rosen <cbr4830@rit.edu>
-date: December, 2013
 description: Represents a Github Issue tracker object used
 for getting the dates issues were opened.
 

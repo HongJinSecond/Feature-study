@@ -1,9 +1,3 @@
-"""
-file: db.py
-author: Ben Grawi <bjg1568@rit.edu>
-date: October 2013
-description: Holds the db connection info
-"""
 from config import *
 import sqlalchemy
 from sqlalchemy import *
