@@ -6,12 +6,16 @@ Do not use this directory as the work path. Please change in each project direct
 
 ## Commit Guru Improved
 
-This project is our proposed improved tool to extract the datasets of a software project. You can check the detail information in "./Commit-Guru-Improved/README.md".
+This project is our proposed improved tool to extract the datasets of a software project. You can check the detail information in [./Commit-Guru-Improved/README.md](./Commit-Guru-Improved/README.md).
+
+
 
 
 ## empirical study
 
-This project is our experiment project to answer our RQs about the feature issue. Please check "./empirical study/README.md to get the information".
+This project is our experiment project to answer our RQs about the feature issue. Please check [./empirical study/README.md](./empirical study/README.md).
+
+
 
 ## Supplemental.pdf
 
