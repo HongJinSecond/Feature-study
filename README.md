@@ -13,10 +13,11 @@ This project is our proposed improved tool to extract the datasets of a software
 
 ## empirical study
 
-This project is our experiment project to answer our RQs about the feature issue. Please check [./empirical study/README.md](./empirical study/README.md).
+This project is our experiment project to answer our RQs about the feature issue. Please check [./empirical-study/README.md](./empirical-study/README.md).
 
 
 
 ## Supplemental.pdf
 
 This is the supplemental materials for our experimental results.
+

@@ -1,0 +1,2684 @@
+
+
+from ingester.git import *
+from orm.commit import *
+from datetime import datetime
+import os
+import logging
+class LocalRepository():
+    repo = None
+    adapter = None
+    start_date = None
+    def __init__(self, repo):
+        self.repo = repo
+        self.adapter = Git
+        self.commits = {}
+    def sync(self):
+        firstSync = self.syncRepoFiles()
+        self.syncCommits(firstSync)
+        self.repo.ingestion_date = self.start_date
+    def syncRepoFiles(self):
+        self.start_date = str(datetime.now().replace(microsecond=0))
+        path = os.path.dirname(__file__) + self.adapter.REPO_DIRECTORY + self.repo.id
+        if os.path.isdir(path):
+            self.adapter.pull(self.adapter, self.repo)
+            firstSync = False
+        else:
+            self.adapter.clone(self.adapter, self.repo)
+            firstSync = True
+        return firstSync
+    def syncCommits(self, firstSync):
+        commits = self.adapter.log(self.adapter, self.repo, firstSync)
+        commitsSession = Session()
+        logging.info('Saving commits to the database...')
+        for commitDict in commits:
+            commitDict['repository_id'] = self.repo.id
+            commitsSession.merge(Commit(commitDict))
+        commitsSession.commit()
+        commitsSession.close()
+        logging.info('Done saving commits to the database.')
+class CommitFile:
+	def __init__(self, name, loc, authors, lastchanged):
+		self.name = name												
+		self.loc = loc													
+		self.authors = authors									
+		self.lastchanged = lastchanged					
+		self.nuc = 1
+import copy
+class Commit:
+    def __init__(self) -> None:
+        self.hash_code=''
+        self.parent_hash=None
+        self.file_dict=None
+        self.Is_merge=False
+        self.Is_branch_start=False
+        self.followCommit=[]
+        self.copy_count=0
+    def get_dict(self)->dict:
+        if self.Is_branch_start==True:
+            return copy.deepcopy(self.file_dict)
+        else:
+            return self.file_dict
+    def update_dict(self,file_dict:dict):
+        if self.copy_count==len(self.followCommit):
+            file_dict.clear()
+            return
+        if self.Is_merge==True:
+            self.file_dict=copy.deepcopy(file_dict)
+        else:
+            self.file_dict=file_dict
+    def release_memory(self):
+        self.copy_count+=1
+        if self.copy_count==len(self.followCommit):
+            if self.Is_branch_start:
+                self.file_dict.clear()
+            self.file_dict=None
+from caslogging import logging
+import sys
+from datetime import datetime, timedelta
+from orm.commit import *
+from orm.repository import *
+from orm.metrics import *
+from ingester.localrepository import *
+def ingestRepo(repository_to_ingest, session):
+  logging.info( 'A worker is starting scan repository: ' +
+                      repository_to_ingest.id )
+  repository_to_ingest.status = "Ingesting"
+  session.commit()
+  local_repo = LocalRepository(repository_to_ingest)
+  local_repo.sync()
+  session.merge(repository_to_ingest) 
+  repository_to_ingest.status = "Waiting to be Analyzed" 
+  session.commit() 
+  logging.info( 'A worker finished ingesting repo ' + 
+                  repository_to_ingest.id )
+  session.close()
+def ingest(repo_id):
+  session = Session()
+  repo_to_analyze = (session.query(Repository)
+        .filter (Repository.id == repo_id)
+        .all()
+        )
+  if len(repo_to_analyze) == 1:
+  	ingestRepo(repo_to_analyze[0], session)
+  else:
+    logging.info('Repo with id ' + repo_id_to_analyze + ' not found!')
+  session.close()
+import os
+import subprocess
+import json
+import logging
+import math                               
+from ingester.commitFile import *         
+from classifier.classifier import *       
+import time
+import re
+from ingester.commit import Commit
+import gc
+import copy
+class Git():
+    LOG_FORMAT = '--pretty=format:\" CAS_READER_STARTPRETTY\
+    \\"parent_hashes\\"CAS_READER_PROP_DELIMITER: \\"%P\\",CAS_READER_PROP_DELIMITER2\
+    \\"commit_hash\\"CAS_READER_PROP_DELIMITER: \\"%H\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_name\\"CAS_READER_PROP_DELIMITER: \\"%an\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_email\\"CAS_READER_PROP_DELIMITER: \\"%ae\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_date\\"CAS_READER_PROP_DELIMITER: \\"%ad\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_date_unix_timestamp\\"CAS_READER_PROP_DELIMITER: \\"%at\\",CAS_READER_PROP_DELIMITER2\
+    \\"commit_message\\"CAS_READER_PROP_DELIMITER: \\"%s%b\\"\
+    CAS_READER_STOPPRETTY \" --numstat --reverse '
+    CLONE_CMD = 'git clone {!s} {!s}'     
+    PULL_CMD = 'git pull'      
+    RESET_CMD = 'git reset --hard FETCH_HEAD'
+    CLEAN_CMD = 'git clean -df' 
+    REPO_DIRECTORY = os.path.join("CASRepos","git")        
+    def getCommitStatsProperties(self,stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp ):
+        statProperties = ""
+        subsystemsSeen = []                         
+        directoriesSeen = []                        
+        locModifiedPerFile = []                     
+        authors = []                                
+        fileAges = []                               
+        la = 0                                      
+        ld = 0                                      
+        nf = 0                                      
+        ns = 0                                      
+        nd = 0                                      
+        entrophy = 0                                
+        lt = 0                                      
+        ndev = 0                                    
+        age = 0                                     
+        exp = 0                                     
+        rexp = 0                                    
+        sexp = 0                                    
+        totalLOCModified = 0                        
+        nuc = 0                                     
+        filesSeen = ""                              
+        for stat in stats:
+            if( stat == ' ' or stat == '' ):
+                continue
+            fileStat = stat.split("\t") 
+            if( len(fileStat) < 2):
+                continue
+            try:
+                fileLa = int(fileStat[0])
+                fileLd = int(fileStat[1])
+            except:
+                fileLa = 0
+                fileLd = 0
+            fileName = (fileStat[2].replace("'",'').replace('"','').replace("\\",""))
+            totalModified = fileLa + fileLd
+            if(fileName in commitFiles):
+                prevFileChanged = commitFiles[fileName]
+                prevLOC = getattr(prevFileChanged, 'loc')
+                prevAuthors = getattr(prevFileChanged, 'authors')
+                prevChanged = getattr(prevFileChanged, 'lastchanged')
+                file_nuc = getattr(prevFileChanged, 'nuc')
+                nuc += file_nuc
+                lt += prevLOC
+                for prevAuthor in prevAuthors:
+                    if prevAuthor not in authors:
+                        authors.append(prevAuthor)
+                age += ( (int(unixTimeStamp) - int(prevChanged)) / 86400 )
+                fileAges.append(prevChanged)
+                file_nuc += 1 
+                setattr(prevFileChanged, 'loc', prevLOC + fileLa - fileLd)
+                setattr(prevFileChanged, 'authors', authors)
+                setattr(prevFileChanged, 'lastchanged', unixTimeStamp)
+                setattr(prevFileChanged, 'nuc', file_nuc)
+            else:
+                if(author not in authors):
+                    authors.append(author)
+                if(unixTimeStamp not in fileAges):
+                    fileAges.append(unixTimeStamp)
+                fileObject = CommitFile(fileName, fileLa - fileLd, authors, unixTimeStamp)
+                commitFiles[fileName] = fileObject
+            locModifiedPerFile.append(totalModified) 
+            totalLOCModified += totalModified
+            fileDirs = fileName.split("/")
+            if( len(fileDirs) == 1 ):
+                subsystem = "root"
+                directory = "root"
+            else:
+                subsystem = fileDirs[0]
+                directory = "/".join(fileDirs[0:-1])
+            if( subsystem not in subsystemsSeen ):
+                subsystemsSeen.append( subsystem )
+            if( author in devExperience ):
+                experiences = devExperience[author]
+                exp += sum(experiences.values())
+                if( subsystem in experiences ):
+                    sexp = experiences[subsystem]
+                    experiences[subsystem] += 1
+                else:
+                    experiences[subsystem] = 1
+                try:
+                    rexp += (1 / (age) + 1)
+                except:
+                    rexp += 0
+            else:
+                devExperience[author] = {subsystem: 1}
+            if( directory not in directoriesSeen ):
+                directoriesSeen.append( directory )
+            la += fileLa
+            ld += fileLd
+            nf += 1
+            filesSeen += fileName + ",CAS_DELIMITER,"
+        if( nf < 1):
+            return ""
+        ns = len(subsystemsSeen)
+        nd = len(directoriesSeen)
+        ndev = len(authors)
+        lt = lt / nf
+        age = age / nf
+        exp = exp / nf
+        rexp = rexp / nf
+        for fileLocMod in locModifiedPerFile:
+            if (fileLocMod != 0 ):
+                avg = fileLocMod/totalLOCModified
+                entrophy -= ( avg * math.log( avg,2 ) )
+        statProperties += ',"la":"' + str( la ) + '\"'
+        statProperties += ',"ld":"' + str( ld ) + '\"'
+        statProperties += ',"fileschanged":"' + filesSeen[0:-1] + '\"'
+        statProperties += ',"nf":"' + str( nf ) + '\"'
+        statProperties += ',"ns":"' + str( ns ) + '\"'
+        statProperties += ',"nd":"' + str( nd ) + '\"'
+        statProperties += ',"entrophy":"' + str(  entrophy ) + '\"'
+        statProperties += ',"ndev":"' + str( ndev ) + '\"'
+        statProperties += ',"lt":"' + str( lt ) + '\"'
+        statProperties += ',"nuc":"' + str( nuc ) + '\"'
+        statProperties += ',"age":"' + str( age ) + '\"'
+        statProperties += ',"exp":"' + str( exp ) + '\"'
+        statProperties += ',"rexp":"' + str( rexp ) + '\"'
+        statProperties += ',"sexp":"' + str( sexp ) + '\"'
+        return statProperties
+    def log(self, repo, firstSync):
+        repo_dir = os.chdir(os.path.join(os.path.dirname(__file__),os.path.join(self.REPO_DIRECTORY,repo.id)))
+        logging.info('Getting/parsing git commits: '+ str(repo) )
+        commitStructure=dict()
+        cmd2= 'git log --format=%H,%P --reverse'
+        log = str( subprocess.check_output(cmd2, shell=True, cwd =repo_dir).decode("utf8") )
+        info=log.split("\n")
+        print(f"-----Staring create structure-----")
+        for data in info:
+            if data=="":
+                continue
+            c=Commit()
+            d=data.split(',')
+            c.hash_code=d[0]
+            c.parent_hash=d[1].split(" ")
+            commitStructure[c.hash_code]=c
+            del c
+        for data in info:
+            if data=="":
+                continue
+            d=data.split(',')
+            c=commitStructure[d[0]]
+            if(len(c.parent_hash)==2):
+                c.Is_merge=True
+                commitStructure[c.parent_hash[0]].followCommit.append(c.hash_code)
+                commitStructure[c.parent_hash[1]].followCommit.append(c.hash_code)
+            elif(c.parent_hash[0]!=""):
+                c2=commitStructure[c.parent_hash[0]]
+                c2.followCommit.append(c.hash_code)
+                if(len(commitStructure[c.parent_hash[0]].followCommit)>=2):
+                    commitStructure[c.parent_hash[0]].Is_branch_start=True
+            del c
+        del info
+        print('-----Structure init done-----')
+        print('-----Starting check stats-----')
+        if not firstSync and repo.ingestion_date is not None:
+            cmd = 'git log --encoding="utf-8" --after="' + repo.ingestion_date + '" '
+        else:
+            cmd = 'git log --encoding="utf-8" '
+        log = str( subprocess.check_output(cmd + self.LOG_FORMAT, shell=True, cwd = repo_dir ).decode("utf-8",errors="replace") ) 
+        json_list = []
+        if len(log) == 0:
+            return []
+        commitFiles = {}            
+        devExperience = {}          
+        devExperience_b={}
+        classifier = Classifier()   
+        commitList = log.split("CAS_READER_STARTPRETTY")
+        times=0
+        print('-----Stats check over-----')
+        sizee=len(commitList)
+        print(f"当前项目的提交数量为：{sizee}")
+        print('-----Starting feature extracttion-----')
+        kill_count=0
+        for commit in commitList:
+            print(f"处理第{times}项,当前进度{(times/sizee)*100}%")
+            times+=1
+            author = ""                                 
+            unixTimeStamp = 0                           
+            fix = False                                 
+            classification = None                       
+            isMerge = False                             
+            hash_code=''
+            parents=[]
+            splitCommitStat = commit.split("CAS_READER_STOPPRETTY")  
+            if(len(splitCommitStat) < 2):
+                continue
+            prettyCommit = splitCommitStat[0]
+            statCommit = splitCommitStat[1]
+            commitObject = ""
+            prettyInfo = prettyCommit.split(',CAS_READER_PROP_DELIMITER2    "')
+            for propValue in prettyInfo:
+                props = propValue.split('"CAS_READER_PROP_DELIMITER: "',1)
+                values = []
+                for prop in props:
+                    prop = prop.replace('\\','').replace("\\n", '')  
+                    while prop.startswith("\b"):
+                          prop = prop.replace("\b",'',1) 
+                    values.append('"'+prop.replace('"','')+'"')
+                if(values[0] == '"    parent_hashes"'):
+                    parents = values[1].strip("'\"").split(' ')
+                    if len(parents) == 2:
+                        isMerge = True
+                if(values[0] == '"commit_hash"'):
+                    hash_code = values[1].replace('"', '')
+                if(values[0] == '"author_name"'):
+                    author = values[1].replace('"', '')
+                if(values[0] == '"author_date_unix_timestamp"'):
+                    unixTimeStamp = values[1].replace('"','')
+                if(values[0] == '"commit_message"'):
+                    if (isMerge):
+                        classification = "Merge"
+                    else:
+                        classification = classifier.categorize(values[1].lower())
+                    if classification == "Corrective":
+                        fix = True
+                commitObject += "," + ":".join(values).replace("\n","\\n").replace("\t","\\t").replace("\r","\\r") 
+                commitObject = commitObject.replace("\x09"," ").replace('\x08', ' ').replace("\x07", " ").replace("\x06"," ").replace("\x05"," ").replace("\x04"," ").replace("\x03"," ").replace("\x02"," ").replace("\x01"," ").replace("\x00"," ") 
+            stats = statCommit.split("\n") 
+            c=commitStructure[hash_code]
+            if(c.Is_merge==False):
+                if(parents[0]==""):
+                    my_files=dict()
+                else:
+                    p=commitStructure[parents[0]]
+                    my_files=p.get_dict()
+                    p.release_memory()
+                if(my_files==None):
+                    my_files=copy.deepcopy(commitFiles)
+                commitObject+=self.getCommitStatsProperties(stats,my_files, devExperience_b,hash_code,parents, author, unixTimeStamp)
+                c.update_dict(my_files)
+                self.getCommitStatsProperties(stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp)
+            else:
+                self.getCommitStatsProperties(stats,commitFiles, devExperience_b,hash_code,parents, author, unixTimeStamp)
+                commitObject += self.getCommitStatsProperties(stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp)
+                c.update_dict(commitFiles)
+                p1=commitStructure[parents[0]]
+                p2=commitStructure[parents[1]]
+                if p1.file_dict!=None:
+                    p1.file_dict.clear()
+                if p2.file_dict!=None:
+                    p2.file_dict.clear()
+                p1.release_memory()
+                p2.release_memory()
+            commitObject += ',"classification":"' + str( classification ) + '\"'
+            commitObject += ',"fix":"' + str( fix ) + '\"'
+            commitObject = commitObject[1:].replace('    ','')
+            json_list.append(json.loads('{' + commitObject + '}',strict=False))
+        logging.info('Done getting/parsing git commits.')
+        return json_list
+    def clone(self, repo):
+        repo_dir = os.chdir(os.path.join(os.path.dirname(__file__),self.REPO_DIRECTORY))
+        logging.info('Git cloning repo: '+ str(repo) )
+        cloneResult = str(subprocess.check_output(
+                  self.CLONE_CMD.format(repo.url, './' + repo.id),
+                  shell= True,
+                  cwd = repo_dir ) )
+        logging.info('Done cloning.')
+        return True
+    def pull(self, repo):
+        repo_dir = os.path.dirname(__file__) + self.REPO_DIRECTORY + repo.id
+        subprocess.call(self.RESET_CMD, shell=True, cwd= repo_dir)
+        subprocess.call(self.CLEAN_CMD, shell=True, cwd= repo_dir)
+        logging.info('Pulling latest changes from repo: '+ str(repo) )
+        fetchResult = str(subprocess.check_output(
+                  self.RESET_CMD + "\n" + self.PULL_CMD ,
+                  shell=True,
+                  cwd=  repo_dir  ) )
+        logging.info('Done fetching.')
+        return True
+from classifier.category import *
+import os 
+class Classifier():
+	categories = [] 
+	def __init__(self):
+		current_dir = os.path.dirname(__file__)
+		dir_of_cats = current_dir + '/Categories'
+		corrective = Category(dir_of_cats + "/corrective.csv", "Corrective")
+		feature_addition = Category(dir_of_cats + "/feature_addition.csv", "Feature Addition")
+		non_functional = Category(dir_of_cats + "/non_functional.csv", "Non Functional")
+		perfective = Category(dir_of_cats + "/perfective.csv", "Perfective")
+		perventive = Category(dir_of_cats + "/preventative.csv", "Preventative")
+		self.categories.extend([corrective,feature_addition,non_functional,perfective,perventive])
+	def categorize(self, commit_msg):
+		category_found = False
+		for category in self.categories:
+			if category.belongs(commit_msg):
+				return category.getName()
+		return "None"
+import csv 
+class Category():
+	associatedWords = [] 
+	category_name = None 
+	def __init__(self, fileLocation, name):
+		self.category_name = name
+		self.associatedWords = [] 
+		self.readInAssociatedWords(fileLocation)
+	def readInAssociatedWords(self, fileLocation):
+		with open(fileLocation, 'rt',encoding="utf-8") as csvfile:
+			wordreader = csv.reader(csvfile, delimiter=',', quotechar='|')
+			for row in wordreader:
+				for word in row:
+					self.associatedWords.append(word)
+	def belongs(self, commit_msg):
+		commit_msg = commit_msg.lower()  
+		for assoc_word in self.associatedWords:
+			assoc_word = assoc_word.split("...")  
+			found_keyword = True
+			for part_keyword in assoc_word: 
+				if found_keyword and part_keyword in commit_msg:
+					found_keyword = True
+				else:
+					found_keyword = False
+			if found_keyword:
+				return True
+		return False
+	def getName(self):
+		return self.category_name
+from cas_manager import *
+from analyzer.analyzer import *
+from orm.feedback import * 
+from orm.user import * 
+from orm.glmcoefficients import * 
+if len(sys.argv) > 1:
+	arg = sys.argv[1]
+else:
+	arg = ''
+if arg == "initDb":
+    logging.info('Initializing the Database...')
+    Base.metadata.create_all(engine)
+    logging.info('Done')
+else:
+	logging.info("Starting CAS Manager")
+	cas_manager = CAS_Manager()
+	logging.info("Thread start")
+	cas_manager.start()
+import os
+import subprocess
+import json
+import logging
+import math                               
+from ingester.commitFile import *         
+from classifier.classifier import *       
+import time
+import re
+import ingester.commit
+import gc
+from orm.commit import *
+from datetime import datetime
+import copy
+from orm.repository import *
+from monthdelta import MonthDelta
+import sys
+import calendar 
+from analyzer.analyzer import *
+import sys
+from datetime import datetime, timedelta
+from orm.repository import *
+from orm.commit import *
+from analyzer.bugfinder import *
+from analyzer.metricsgenerator import *
+from analyzer.githubissuetracker import *
+from caslogging import logging
+from analyzer.notifier import *
+from config import config
+from analyzer.git_commit_linker import *
+from sqlalchemy import Date, cast
+from ingester.commit import Commit as CommitNode
+class Git():
+    LOG_FORMAT = '--pretty=format:\" CAS_READER_STARTPRETTY\
+    \\"parent_hashes\\"CAS_READER_PROP_DELIMITER: \\"%P\\",CAS_READER_PROP_DELIMITER2\
+    \\"commit_hash\\"CAS_READER_PROP_DELIMITER: \\"%H\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_name\\"CAS_READER_PROP_DELIMITER: \\"%an\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_email\\"CAS_READER_PROP_DELIMITER: \\"%ae\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_date\\"CAS_READER_PROP_DELIMITER: \\"%ad\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_date_unix_timestamp\\"CAS_READER_PROP_DELIMITER: \\"%at\\",CAS_READER_PROP_DELIMITER2\
+    \\"commit_message\\"CAS_READER_PROP_DELIMITER: \\"%s%b\\"\
+    CAS_READER_STOPPRETTY \" --numstat --reverse '
+    CLONE_CMD = 'git clone {!s} {!s}'     
+    PULL_CMD = 'git pull'      
+    RESET_CMD = 'git reset --hard FETCH_HEAD'
+    CLEAN_CMD = 'git clean -df' 
+    REPO_DIRECTORY = os.path.join("CASRepos","git")        
+    def getCommitStatsProperties(self,stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp ):
+        statProperties = ""
+        subsystemsSeen = []                         
+        directoriesSeen = []                        
+        locModifiedPerFile = []                     
+        authors = []                                
+        fileAges = []                               
+        la = 0                                      
+        ld = 0                                      
+        nf = 0                                      
+        ns = 0                                      
+        nd = 0                                      
+        entrophy = 0                                
+        lt = 0                                      
+        ndev = 0                                    
+        age = 0                                     
+        exp = 0                                     
+        rexp = 0                                    
+        sexp = 0                                    
+        totalLOCModified = 0                        
+        nuc = 0                                     
+        filesSeen = ""                              
+        for stat in stats:
+            if( stat == ' ' or stat == '' ):
+                continue
+            fileStat = stat.split("\t") 
+            if( len(fileStat) < 2):
+                continue
+            try:
+                fileLa = int(fileStat[0])
+                fileLd = int(fileStat[1])
+            except:
+                fileLa = 0
+                fileLd = 0
+            fileName = (fileStat[2].replace("'",'').replace('"','').replace("\\",""))
+            totalModified = fileLa + fileLd
+            if(fileName in commitFiles):
+                prevFileChanged = commitFiles[fileName]
+                prevLOC = getattr(prevFileChanged, 'loc')
+                prevAuthors = getattr(prevFileChanged, 'authors')
+                prevChanged = getattr(prevFileChanged, 'lastchanged')
+                file_nuc = getattr(prevFileChanged, 'nuc')
+                nuc += file_nuc
+                lt += prevLOC
+                for prevAuthor in prevAuthors:
+                    if prevAuthor not in authors:
+                        authors.append(prevAuthor)
+                age += ( (int(unixTimeStamp) - int(prevChanged)) / 86400 )
+                fileAges.append(prevChanged)
+                file_nuc += 1 
+                setattr(prevFileChanged, 'loc', prevLOC + fileLa - fileLd)
+                setattr(prevFileChanged, 'authors', authors)
+                setattr(prevFileChanged, 'lastchanged', unixTimeStamp)
+                setattr(prevFileChanged, 'nuc', file_nuc)
+            else:
+                if(author not in authors):
+                    authors.append(author)
+                if(unixTimeStamp not in fileAges):
+                    fileAges.append(unixTimeStamp)
+                fileObject = CommitFile(fileName, fileLa - fileLd, authors, unixTimeStamp)
+                commitFiles[fileName] = fileObject
+            locModifiedPerFile.append(totalModified) 
+            totalLOCModified += totalModified
+            fileDirs = fileName.split("/")
+            if( len(fileDirs) == 1 ):
+                subsystem = "root"
+                directory = "root"
+            else:
+                subsystem = fileDirs[0]
+                directory = "/".join(fileDirs[0:-1])
+            if( subsystem not in subsystemsSeen ):
+                subsystemsSeen.append( subsystem )
+            if( author in devExperience ):
+                experiences = devExperience[author]
+                exp += sum(experiences.values())
+                if( subsystem in experiences ):
+                    sexp = experiences[subsystem]
+                    experiences[subsystem] += 1
+                else:
+                    experiences[subsystem] = 1
+                try:
+                    rexp += (1 / (age) + 1)
+                except:
+                    rexp += 0
+            else:
+                devExperience[author] = {subsystem: 1}
+            if( directory not in directoriesSeen ):
+                directoriesSeen.append( directory )
+            la += fileLa
+            ld += fileLd
+            nf += 1
+            filesSeen += fileName + ",CAS_DELIMITER,"
+        if( nf < 1):
+            return ""
+        ns = len(subsystemsSeen)
+        nd = len(directoriesSeen)
+        ndev = len(authors)
+        lt = lt / nf
+        age = age / nf
+        exp = exp / nf
+        rexp = rexp / nf
+        for fileLocMod in locModifiedPerFile:
+            if (fileLocMod != 0 ):
+                avg = fileLocMod/totalLOCModified
+                entrophy -= ( avg * math.log( avg,2 ) )
+        statProperties += ',"la":"' + str( la ) + '\"'
+        statProperties += ',"ld":"' + str( ld ) + '\"'
+        statProperties += ',"fileschanged":"' + filesSeen[0:-1] + '\"'
+        statProperties += ',"nf":"' + str( nf ) + '\"'
+        statProperties += ',"ns":"' + str( ns ) + '\"'
+        statProperties += ',"nd":"' + str( nd ) + '\"'
+        statProperties += ',"entrophy":"' + str(  entrophy ) + '\"'
+        statProperties += ',"ndev":"' + str( ndev ) + '\"'
+        statProperties += ',"lt":"' + str( lt ) + '\"'
+        statProperties += ',"nuc":"' + str( nuc ) + '\"'
+        statProperties += ',"age":"' + str( age ) + '\"'
+        statProperties += ',"exp":"' + str( exp ) + '\"'
+        statProperties += ',"rexp":"' + str( rexp ) + '\"'
+        statProperties += ',"sexp":"' + str( sexp ) + '\"'
+        return statProperties
+    def log(self, repo_id, firstSync):
+        repo_dir = os.chdir(os.path.join(os.path.join(os.path.dirname(__file__),'ingester') ,os.path.join(self.REPO_DIRECTORY ,repo_id)))
+        logging.info(f'Getting/parsing git commits: test repo {repo_id}')
+        print(f"-----Staring create structure-----")
+        cmd = 'git log --encoding="utf-8" '
+        log = str( subprocess.check_output(cmd + self.LOG_FORMAT, shell=True, cwd = repo_dir ).decode("utf-8",errors="replace")) 
+        json_list = []
+        if len(log) == 0:
+            return []
+        commitFiles = {}            
+        devExperience = {}          
+        classifier = Classifier()   
+        commitList = log.split("CAS_READER_STARTPRETTY")
+        times=0
+        print('-----Stats check over-----')
+        sizee=len(commitList)
+        print(f"当前项目的提交数量为：{sizee}")
+        print('-----Starting feature extracttion-----')
+        gc.enable()
+        for commit in commitList:
+            print(f"处理第{times}项,当前进度{(times/sizee)*100}%")
+            times+=1
+            author = ""                                 
+            unixTimeStamp = 0                           
+            fix = False                                 
+            classification = None                       
+            isMerge = False                             
+            hash_code=''
+            parents=[]
+            splitCommitStat = commit.split("CAS_READER_STOPPRETTY")  
+            if(len(splitCommitStat) < 2):
+                continue
+            prettyCommit = splitCommitStat[0]
+            statCommit = splitCommitStat[1]
+            commitObject = ""
+            prettyInfo = prettyCommit.split(',CAS_READER_PROP_DELIMITER2    "')
+            for propValue in prettyInfo:
+                props = propValue.split('"CAS_READER_PROP_DELIMITER: "',1)
+                values = []
+                for prop in props:
+                    prop = prop.replace('\\','').replace("\\n", '')  
+                    while prop.startswith("\b"):
+                          prop = prop.replace("\b",'',1) 
+                    values.append('"'+prop.replace('"','')+'"')
+                if(values[0] == '"    parent_hashes"'):
+                    parents = values[1].strip("'\"").split(' ')
+                    if len(parents) == 2:
+                        isMerge = True
+                if(values[0] == '"commit_hash"'):
+                    hash_code = values[1].replace('"', '')
+                if(values[0] == '"author_name"'):
+                    author = values[1].replace('"', '')
+                if(values[0] == '"author_date_unix_timestamp"'):
+                    unixTimeStamp = values[1].replace('"','')
+                if(values[0] == '"commit_message"'):
+                    if (isMerge):
+                        classification = "Merge"
+                    else:
+                        classification = classifier.categorize(values[1].lower())
+                    if classification == "Corrective":
+                        fix = True
+                commitObject += "," + ":".join(values).replace("\n","\\n").replace("\t","\\t").replace("\r","\\r") 
+                commitObject = commitObject.replace("\x09"," ").replace('\x08', ' ').replace("\x07", " ").replace("\x06"," ").replace("\x05"," ").replace("\x04"," ").replace("\x03"," ").replace("\x02"," ").replace("\x01"," ").replace("\x00"," ") 
+            stats = statCommit.split("\n") 
+            commitObject += self.getCommitStatsProperties(stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp)
+            commitObject += ',"classification":"' + str( classification ) + '\"'
+            commitObject += ',"fix":"' + str( fix ) + '\"'
+            commitObject = commitObject[1:].replace('    ','')
+            json_list.append(json.loads('{' + commitObject + '}',strict=False))
+        logging.info('Done getting/parsing git commits.')
+        return json_list
+    def getJsonList(self):
+        json_list=[]
+        for commitObject in self.log(None,False):
+            json_list.append(json.loads('{' + commitObject + '}'))
+        return json_list
+    def clone(self, repo):
+        repo_dir = os.chdir(os.path.join(os.path.dirname(__file__),self.REPO_DIRECTORY))
+        logging.info('Git cloning repo: '+ str(repo) )
+        cloneResult = str(subprocess.check_output(
+                  self.CLONE_CMD.format(repo.url, './' + repo.id),
+                  shell= True,
+                  cwd = repo_dir ) )
+        logging.info('Done cloning.')
+        return True
+    def pull(self, repo):
+        repo_dir = os.path.dirname(__file__) + self.REPO_DIRECTORY + repo.id
+        subprocess.call(self.RESET_CMD, shell=True, cwd= repo_dir)
+        subprocess.call(self.CLEAN_CMD, shell=True, cwd= repo_dir)
+        logging.info('Pulling latest changes from repo: '+ str(repo) )
+        fetchResult = str(subprocess.check_output(
+                  self.RESET_CMD + "\n" + self.PULL_CMD ,
+                  shell=True,
+                  cwd=  repo_dir  ) )
+        logging.info('Done fetching.')
+        return True
+    LOG_FORMAT = '--pretty=format:\" CAS_READER_STARTPRETTY\
+    \\"parent_hashes\\"CAS_READER_PROP_DELIMITER: \\"%P\\",CAS_READER_PROP_DELIMITER2\
+    \\"commit_hash\\"CAS_READER_PROP_DELIMITER: \\"%H\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_name\\"CAS_READER_PROP_DELIMITER: \\"%an\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_email\\"CAS_READER_PROP_DELIMITER: \\"%ae\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_date\\"CAS_READER_PROP_DELIMITER: \\"%ad\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_date_unix_timestamp\\"CAS_READER_PROP_DELIMITER: \\"%at\\",CAS_READER_PROP_DELIMITER2\
+    \\"commit_message\\"CAS_READER_PROP_DELIMITER: \\"%s%b\\"\
+    CAS_READER_STOPPRETTY \" --numstat --reverse '
+    CLONE_CMD = 'git clone {!s} {!s}'     
+    PULL_CMD = 'git pull'      
+    RESET_CMD = 'git reset --hard FETCH_HEAD'
+    CLEAN_CMD = 'git clean -df' 
+    REPO_DIRECTORY = os.path.join("CASRepos","git")        
+    def getCommitStatsProperties(self,stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp ):
+        statProperties = ""
+        subsystemsSeen = []                         
+        directoriesSeen = []                        
+        locModifiedPerFile = []                     
+        authors = []                                
+        fileAges = []                               
+        la = 0                                      
+        ld = 0                                      
+        nf = 0                                      
+        ns = 0                                      
+        nd = 0                                      
+        entrophy = 0                                
+        lt = 0                                      
+        ndev = 0                                    
+        age = 0                                     
+        exp = 0                                     
+        rexp = 0                                    
+        sexp = 0                                    
+        totalLOCModified = 0                        
+        nuc = 0                                     
+        filesSeen = ""                              
+        for stat in stats:
+            if( stat == ' ' or stat == '' ):
+                continue
+            fileStat = stat.split("\t") 
+            if( len(fileStat) < 2):
+                continue
+            try:
+                fileLa = int(fileStat[0])
+                fileLd = int(fileStat[1])
+            except:
+                fileLa = 0
+                fileLd = 0
+            fileName = (fileStat[2].replace("'",'').replace('"','').replace("\\",""))
+            totalModified = fileLa + fileLd
+            if(fileName in commitFiles):
+                prevFileChanged = commitFiles[fileName]
+                prevLOC = getattr(prevFileChanged, 'loc')
+                prevAuthors = getattr(prevFileChanged, 'authors')
+                prevChanged = getattr(prevFileChanged, 'lastchanged')
+                file_nuc = getattr(prevFileChanged, 'nuc')
+                nuc += file_nuc
+                lt += prevLOC
+                for prevAuthor in prevAuthors:
+                    if prevAuthor not in authors:
+                        authors.append(prevAuthor)
+                age += ( (int(unixTimeStamp) - int(prevChanged)) / 86400 )
+                fileAges.append(prevChanged)
+                file_nuc += 1 
+                setattr(prevFileChanged, 'loc', prevLOC + fileLa - fileLd)
+                setattr(prevFileChanged, 'authors', authors)
+                setattr(prevFileChanged, 'lastchanged', unixTimeStamp)
+                setattr(prevFileChanged, 'nuc', file_nuc)
+            else:
+                if(author not in authors):
+                    authors.append(author)
+                if(unixTimeStamp not in fileAges):
+                    fileAges.append(unixTimeStamp)
+                fileObject = CommitFile(fileName, fileLa - fileLd, authors, unixTimeStamp)
+                commitFiles[fileName] = fileObject
+            locModifiedPerFile.append(totalModified) 
+            totalLOCModified += totalModified
+            fileDirs = fileName.split("/")
+            if( len(fileDirs) == 1 ):
+                subsystem = "root"
+                directory = "root"
+            else:
+                subsystem = fileDirs[0]
+                directory = "/".join(fileDirs[0:-1])
+            if( subsystem not in subsystemsSeen ):
+                subsystemsSeen.append( subsystem )
+            if( author in devExperience ):
+                experiences = devExperience[author]
+                exp += sum(experiences.values())
+                if( subsystem in experiences ):
+                    sexp = experiences[subsystem]
+                    experiences[subsystem] += 1
+                else:
+                    experiences[subsystem] = 1
+                try:
+                    rexp += (1 / (age) + 1)
+                except:
+                    rexp += 0
+            else:
+                devExperience[author] = {subsystem: 1}
+            if( directory not in directoriesSeen ):
+                directoriesSeen.append( directory )
+            la += fileLa
+            ld += fileLd
+            nf += 1
+            filesSeen += fileName + ",CAS_DELIMITER,"
+        if( nf < 1):
+            return ""
+        ns = len(subsystemsSeen)
+        nd = len(directoriesSeen)
+        ndev = len(authors)
+        lt = lt / nf
+        age = age / nf
+        exp = exp / nf
+        rexp = rexp / nf
+        for fileLocMod in locModifiedPerFile:
+            if (fileLocMod != 0 ):
+                avg = fileLocMod/totalLOCModified
+                entrophy -= ( avg * math.log( avg,2 ) )
+        statProperties += ',"la":"' + str( la ) + '\"'
+        statProperties += ',"ld":"' + str( ld ) + '\"'
+        statProperties += ',"fileschanged":"' + filesSeen[0:-1] + '\"'
+        statProperties += ',"nf":"' + str( nf ) + '\"'
+        statProperties += ',"ns":"' + str( ns ) + '\"'
+        statProperties += ',"nd":"' + str( nd ) + '\"'
+        statProperties += ',"entrophy":"' + str(  entrophy ) + '\"'
+        statProperties += ',"ndev":"' + str( ndev ) + '\"'
+        statProperties += ',"lt":"' + str( lt ) + '\"'
+        statProperties += ',"nuc":"' + str( nuc ) + '\"'
+        statProperties += ',"age":"' + str( age ) + '\"'
+        statProperties += ',"exp":"' + str( exp ) + '\"'
+        statProperties += ',"rexp":"' + str( rexp ) + '\"'
+        statProperties += ',"sexp":"' + str( sexp ) + '\"'
+        return statProperties
+    def log(self, repo_id, firstSync):
+        repo_dir = os.chdir(os.path.join(os.path.join(os.path.dirname(__file__),'ingester') ,os.path.join(self.REPO_DIRECTORY ,repo_id)))
+        logging.info(f'Getting/parsing git commits: test repo {repo_id}')
+        print(f"-----Staring create structure-----")
+        cmd = 'git log --encoding="utf-8" '
+        log = str( subprocess.check_output(cmd + self.LOG_FORMAT, shell=True, cwd = repo_dir ).decode("utf-8",errors="replace")) 
+        json_list = []
+        if len(log) == 0:
+            return []
+        commitFiles = {}            
+        devExperience = {}          
+        classifier = Classifier()   
+        commitList = log.split("CAS_READER_STARTPRETTY")
+        times=0
+        print('-----Stats check over-----')
+        sizee=len(commitList)
+        print(f"当前项目的提交数量为：{sizee}")
+        print('-----Starting feature extracttion-----')
+        gc.enable()
+        for commit in commitList:
+            print(f"处理第{times}项,当前进度{(times/sizee)*100}%")
+            times+=1
+            author = ""                                 
+            unixTimeStamp = 0                           
+            fix = False                                 
+            classification = None                       
+            isMerge = False                             
+            hash_code=''
+            parents=[]
+            splitCommitStat = commit.split("CAS_READER_STOPPRETTY")  
+            if(len(splitCommitStat) < 2):
+                continue
+            prettyCommit = splitCommitStat[0]
+            statCommit = splitCommitStat[1]
+            commitObject = ""
+            prettyInfo = prettyCommit.split(',CAS_READER_PROP_DELIMITER2    "')
+            for propValue in prettyInfo:
+                props = propValue.split('"CAS_READER_PROP_DELIMITER: "',1)
+                values = []
+                for prop in props:
+                    prop = prop.replace('\\','').replace("\\n", '')  
+                    while prop.startswith("\b"):
+                          prop = prop.replace("\b",'',1) 
+                    values.append('"'+prop.replace('"','')+'"')
+                if(values[0] == '"    parent_hashes"'):
+                    parents = values[1].strip("'\"").split(' ')
+                    if len(parents) == 2:
+                        isMerge = True
+                if(values[0] == '"commit_hash"'):
+                    hash_code = values[1].replace('"', '')
+                if(values[0] == '"author_name"'):
+                    author = values[1].replace('"', '')
+                if(values[0] == '"author_date_unix_timestamp"'):
+                    unixTimeStamp = values[1].replace('"','')
+                if(values[0] == '"commit_message"'):
+                    if (isMerge):
+                        classification = "Merge"
+                    else:
+                        classification = classifier.categorize(values[1].lower())
+                    if classification == "Corrective":
+                        fix = True
+                commitObject += "," + ":".join(values).replace("\n","\\n").replace("\t","\\t").replace("\r","\\r") 
+                commitObject = commitObject.replace("\x09"," ").replace('\x08', ' ').replace("\x07", " ").replace("\x06"," ").replace("\x05"," ").replace("\x04"," ").replace("\x03"," ").replace("\x02"," ").replace("\x01"," ").replace("\x00"," ") 
+            stats = statCommit.split("\n") 
+            commitObject += self.getCommitStatsProperties(stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp)
+            commitObject += ',"classification":"' + str( classification ) + '\"'
+            commitObject += ',"fix":"' + str( fix ) + '\"'
+            commitObject = commitObject[1:].replace('    ','')
+            json_list.append(json.loads('{' + commitObject + '}',strict=False))
+        logging.info('Done getting/parsing git commits.')
+        return json_list
+    def getJsonList(self):
+        json_list=[]
+        for commitObject in self.log(None,False):
+            json_list.append(json.loads('{' + commitObject + '}'))
+        return json_list
+    def clone(self, repo):
+        repo_dir = os.chdir(os.path.join(os.path.dirname(__file__),self.REPO_DIRECTORY))
+        logging.info('Git cloning repo: '+ str(repo) )
+        cloneResult = str(subprocess.check_output(
+                  self.CLONE_CMD.format(repo.url, './' + repo.id),
+                  shell= True,
+                  cwd = repo_dir ) )
+        logging.info('Done cloning.')
+        return True
+    def pull(self, repo):
+        repo_dir = os.path.dirname(__file__) + self.REPO_DIRECTORY + repo.id
+        subprocess.call(self.RESET_CMD, shell=True, cwd= repo_dir)
+        subprocess.call(self.CLEAN_CMD, shell=True, cwd= repo_dir)
+        logging.info('Pulling latest changes from repo: '+ str(repo) )
+        fetchResult = str(subprocess.check_output(
+                  self.RESET_CMD + "\n" + self.PULL_CMD ,
+                  shell=True,
+                  cwd=  repo_dir  ) )
+        logging.info('Done fetching.')
+        return True
+class BDFE():
+    LOG_FORMAT = '--pretty=format:\" CAS_READER_STARTPRETTY\
+    \\"parent_hashes\\"CAS_READER_PROP_DELIMITER: \\"%P\\",CAS_READER_PROP_DELIMITER2\
+    \\"commit_hash\\"CAS_READER_PROP_DELIMITER: \\"%H\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_name\\"CAS_READER_PROP_DELIMITER: \\"%an\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_email\\"CAS_READER_PROP_DELIMITER: \\"%ae\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_date\\"CAS_READER_PROP_DELIMITER: \\"%ad\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_date_unix_timestamp\\"CAS_READER_PROP_DELIMITER: \\"%at\\",CAS_READER_PROP_DELIMITER2\
+    \\"commit_message\\"CAS_READER_PROP_DELIMITER: \\"%s%b\\"\
+    CAS_READER_STOPPRETTY \" --numstat --reverse '
+    CLONE_CMD = 'git clone {!s} {!s}'     
+    PULL_CMD = 'git pull'      
+    RESET_CMD = 'git reset --hard FETCH_HEAD'
+    CLEAN_CMD = 'git clean -df' 
+    REPO_DIRECTORY = os.path.join("CASRepos","git")        
+    def getCommitStatsProperties(self,stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp ):
+        statProperties = ""
+        subsystemsSeen = []                         
+        directoriesSeen = []                        
+        locModifiedPerFile = []                     
+        authors = []                                
+        fileAges = []                               
+        la = 0                                      
+        ld = 0                                      
+        nf = 0                                      
+        ns = 0                                      
+        nd = 0                                      
+        entrophy = 0                                
+        lt = 0                                      
+        ndev = 0                                    
+        age = 0                                     
+        exp = 0                                     
+        rexp = 0                                    
+        sexp = 0                                    
+        totalLOCModified = 0                        
+        nuc = 0                                     
+        filesSeen = ""                              
+        for stat in stats:
+            if( stat == ' ' or stat == '' ):
+                continue
+            fileStat = stat.split("\t") 
+            if( len(fileStat) < 2):
+                continue
+            try:
+                fileLa = int(fileStat[0])
+                fileLd = int(fileStat[1])
+            except:
+                fileLa = 0
+                fileLd = 0
+            fileName = (fileStat[2].replace("'",'').replace('"','').replace("\\",""))
+            totalModified = fileLa + fileLd
+            if(fileName in commitFiles):
+                prevFileChanged = commitFiles[fileName]
+                prevLOC = getattr(prevFileChanged, 'loc')
+                prevAuthors = getattr(prevFileChanged, 'authors')
+                prevChanged = getattr(prevFileChanged, 'lastchanged')
+                file_nuc = getattr(prevFileChanged, 'nuc')
+                nuc += file_nuc
+                lt += prevLOC
+                for prevAuthor in prevAuthors:
+                    if prevAuthor not in authors:
+                        authors.append(prevAuthor)
+                age += ( (int(unixTimeStamp) - int(prevChanged)) / 86400 )
+                fileAges.append(prevChanged)
+                file_nuc += 1 
+                setattr(prevFileChanged, 'loc', prevLOC + fileLa - fileLd)
+                setattr(prevFileChanged, 'authors', authors)
+                setattr(prevFileChanged, 'lastchanged', unixTimeStamp)
+                setattr(prevFileChanged, 'nuc', file_nuc)
+            else:
+                if(author not in authors):
+                    authors.append(author)
+                if(unixTimeStamp not in fileAges):
+                    fileAges.append(unixTimeStamp)
+                fileObject = CommitFile(fileName, fileLa - fileLd, authors, unixTimeStamp)
+                commitFiles[fileName] = fileObject
+            locModifiedPerFile.append(totalModified) 
+            totalLOCModified += totalModified
+            fileDirs = fileName.split("/")
+            if( len(fileDirs) == 1 ):
+                subsystem = "root"
+                directory = "root"
+            else:
+                subsystem = fileDirs[0]
+                directory = "/".join(fileDirs[0:-1])
+            if( subsystem not in subsystemsSeen ):
+                subsystemsSeen.append( subsystem )
+            if( author in devExperience ):
+                experiences = devExperience[author]
+                exp += sum(experiences.values())
+                if( subsystem in experiences ):
+                    sexp = experiences[subsystem]
+                    experiences[subsystem] += 1
+                else:
+                    experiences[subsystem] = 1
+                try:
+                    rexp += (1 / (age) + 1)
+                except:
+                    rexp += 0
+            else:
+                devExperience[author] = {subsystem: 1}
+            if( directory not in directoriesSeen ):
+                directoriesSeen.append( directory )
+            la += fileLa
+            ld += fileLd
+            nf += 1
+            filesSeen += fileName + ",CAS_DELIMITER,"
+        if( nf < 1):
+            return ""
+        ns = len(subsystemsSeen)
+        nd = len(directoriesSeen)
+        ndev = len(authors)
+        lt = lt / nf
+        age = age / nf
+        exp = exp / nf
+        rexp = rexp / nf
+        for fileLocMod in locModifiedPerFile:
+            if (fileLocMod != 0 ):
+                avg = fileLocMod/totalLOCModified
+                entrophy -= ( avg * math.log( avg,2 ) )
+        statProperties += ',"la":"' + str( la ) + '\"'
+        statProperties += ',"ld":"' + str( ld ) + '\"'
+        statProperties += ',"fileschanged":"' + filesSeen[0:-1] + '\"'
+        statProperties += ',"nf":"' + str( nf ) + '\"'
+        statProperties += ',"ns":"' + str( ns ) + '\"'
+        statProperties += ',"nd":"' + str( nd ) + '\"'
+        statProperties += ',"entrophy":"' + str(  entrophy ) + '\"'
+        statProperties += ',"ndev":"' + str( ndev ) + '\"'
+        statProperties += ',"lt":"' + str( lt ) + '\"'
+        statProperties += ',"nuc":"' + str( nuc ) + '\"'
+        statProperties += ',"age":"' + str( age ) + '\"'
+        statProperties += ',"exp":"' + str( exp ) + '\"'
+        statProperties += ',"rexp":"' + str( rexp ) + '\"'
+        statProperties += ',"sexp":"' + str( sexp ) + '\"'
+        return statProperties
+    def log(self, repo_id, firstSync):
+        repo_dir = os.chdir(os.path.join(os.path.join(os.path.dirname(__file__),'ingester') ,os.path.join(self.REPO_DIRECTORY ,repo_id)))
+        logging.info(f'Getting/parsing git commits: test repo {repo_id}')
+        commitStructure=dict()
+        cmd2= 'git log --format=%H,%P --reverse'
+        log = str( subprocess.check_output(cmd2, shell=True, cwd =repo_dir).decode("utf8") )
+        info=log.split("\n")
+        print(f"-----Staring create structure-----")
+        for data in info:
+            if data=="":
+                continue
+            c=CommitNode()
+            d=data.split(',')
+            c.hash_code=d[0]
+            c.parent_hash=d[1].split(" ")
+            commitStructure[c.hash_code]=c
+            del c
+        for data in info:
+            if data=="":
+                continue
+            d=data.split(',')
+            c=commitStructure[d[0]]
+            if(len(c.parent_hash)==2):
+                c.Is_merge=True
+                commitStructure[c.parent_hash[0]].followCommit.append(c.hash_code)
+                commitStructure[c.parent_hash[1]].followCommit.append(c.hash_code)
+            elif(c.parent_hash[0]!=""):
+                c2=commitStructure[c.parent_hash[0]]
+                c2.followCommit.append(c.hash_code)
+                if(len(commitStructure[c.parent_hash[0]].followCommit)>=2):
+                    commitStructure[c.parent_hash[0]].Is_branch_start=True
+            del c
+        del info
+        logging.info('-----Structure init done-----')
+        logging.info('-----Starting check stats-----')
+        cmd = 'git log --encoding="utf-8" '
+        log = str( subprocess.check_output(cmd + self.LOG_FORMAT, shell=True, cwd = repo_dir ).decode("utf-8",errors="replace") ) 
+        json_list = []
+        if len(log) == 0:
+            return []
+        commitFiles = {}            
+        devExperience = {}          
+        devExperience_b={}
+        classifier = Classifier()   
+        commitList = log.split("CAS_READER_STARTPRETTY")
+        times=0
+        print('-----Stats check over-----')
+        sizee=len(commitList)
+        logging.info(f"当前项目的提交数量为：{sizee}")
+        logging.info('-----Starting feature extracttion-----')
+        kill_count=0
+        for commit in commitList:
+            logging.info(f"处理第{times}项,当前进度{(times/sizee)*100}%")
+            times+=1
+            author = ""                                 
+            unixTimeStamp = 0                           
+            fix = False                                 
+            classification = None                       
+            isMerge = False                             
+            hash_code=''
+            parents=[]
+            splitCommitStat = commit.split("CAS_READER_STOPPRETTY")  
+            if(len(splitCommitStat) < 2):
+                continue
+            prettyCommit = splitCommitStat[0]
+            statCommit = splitCommitStat[1]
+            commitObject = ""
+            prettyInfo = prettyCommit.split(',CAS_READER_PROP_DELIMITER2    "')
+            for propValue in prettyInfo:
+                props = propValue.split('"CAS_READER_PROP_DELIMITER: "',1)
+                values = []
+                for prop in props:
+                    prop = prop.replace('\\','').replace("\\n", '')  
+                    while prop.startswith("\b"):
+                          prop = prop.replace("\b",'',1) 
+                    values.append('"'+prop.replace('"','')+'"')
+                if(values[0] == '"    parent_hashes"'):
+                    parents = values[1].strip("'\"").split(' ')
+                    if len(parents) == 2:
+                        isMerge = True
+                if(values[0] == '"commit_hash"'):
+                    hash_code = values[1].replace('"', '')
+                if(values[0] == '"author_name"'):
+                    author = values[1].replace('"', '')
+                if(values[0] == '"author_date_unix_timestamp"'):
+                    unixTimeStamp = values[1].replace('"','')
+                if(values[0] == '"commit_message"'):
+                    if (isMerge):
+                        classification = "Merge"
+                    else:
+                        classification = classifier.categorize(values[1].lower())
+                    if classification == "Corrective":
+                        fix = True
+                commitObject += "," + ":".join(values).replace("\n","\\n").replace("\t","\\t").replace("\r","\\r") 
+                commitObject = commitObject.replace("\x09"," ").replace('\x08', ' ').replace("\x07", " ").replace("\x06"," ").replace("\x05"," ").replace("\x04"," ").replace("\x03"," ").replace("\x02"," ").replace("\x01"," ").replace("\x00"," ") 
+            stats = statCommit.split("\n") 
+            c=commitStructure[hash_code]
+            if(c.Is_merge==False):
+                if(parents[0]==""):
+                    my_files=dict()
+                else:
+                    p=commitStructure[parents[0]]
+                    my_files=p.get_dict()
+                    p.release_memory()
+                if(my_files==None):
+                    my_files=copy.deepcopy(commitFiles)
+                commitObject+=self.getCommitStatsProperties(stats,my_files, devExperience_b,hash_code,parents, author, unixTimeStamp)
+                c.update_dict(my_files)
+                self.getCommitStatsProperties(stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp)
+            else:
+                self.getCommitStatsProperties(stats,commitFiles, devExperience_b,hash_code,parents, author, unixTimeStamp)
+                commitObject += self.getCommitStatsProperties(stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp)
+                c.update_dict(commitFiles)
+                p1=commitStructure[parents[0]]
+                p2=commitStructure[parents[1]]
+                if p1.file_dict!=None:
+                    p1.file_dict.clear()
+                if p2.file_dict!=None:
+                    p2.file_dict.clear()
+                p1.release_memory()
+                p2.release_memory()
+            commitObject += ',"classification":"' + str( classification ) + '\"'
+            commitObject += ',"fix":"' + str( fix ) + '\"'
+            commitObject = commitObject[1:].replace('    ','')
+            json_list.append(json.loads('{' + commitObject + '}',strict=False))
+        logging.info('Done getting/parsing git commits.')
+        return json_list
+    def clone(self, repo):
+        repo_dir = os.chdir(os.path.join(os.path.dirname(__file__),self.REPO_DIRECTORY))
+        logging.info('Git cloning repo: '+ str(repo) )
+        cloneResult = str(subprocess.check_output(
+                  self.CLONE_CMD.format(repo.url, './' + repo.id),
+                  shell= True,
+                  cwd = repo_dir ) )
+        logging.info('Done cloning.')
+        return True
+    def pull(self, repo):
+        repo_dir = os.path.dirname(__file__) + self.REPO_DIRECTORY + repo.id
+        subprocess.call(self.RESET_CMD, shell=True, cwd= repo_dir)
+        subprocess.call(self.CLEAN_CMD, shell=True, cwd= repo_dir)
+        logging.info('Pulling latest changes from repo: '+ str(repo) )
+        fetchResult = str(subprocess.check_output(
+                  self.RESET_CMD + "\n" + self.PULL_CMD ,
+                  shell=True,
+                  cwd=  repo_dir  ) )
+        logging.info('Done fetching.')
+        return True
+def offline_process(repo_id,Mode="New"):
+    if Mode=="New":
+        git=BDFE()
+        logging.info("Start BDFE model")
+    else:
+        git=Git()
+    commits = git.log(repo_id,False)
+    commitsSession = Session()
+    logging.info('Saving commits to the database...')
+    for commitDict in commits:
+        commitDict['repository_id'] = repo_id
+        commitsSession.merge(Commit(commitDict))
+    commitsSession.commit()
+    commitsSession.close()
+    logging.info('Done saving commits to the database.')
+    session = Session()
+    session.commit()
+    all_commits = (session.query(Commit)
+                .filter( Commit.repository_id == repo_id)
+                .order_by( Commit.author_date_unix_timestamp.desc()).all())
+    corrective_commits = (session.query(Commit)
+        .filter((Commit.fix == "True")&(Commit.repository_id == repo_id )&(Commit.linked == False ))
+        .order_by( Commit.author_date_unix_timestamp.asc()).all())
+    git_commit_linker = GitCommitLinker(repo_id)
+    git_commit_linker.linkCorrectiveCommits(corrective_commits, all_commits)
+    session.commit()
+    glm_model_time = int(config['glm_modeling']['months'])
+    data_months_datetime = datetime.utcnow() - MonthDelta(glm_model_time)
+    data_months_unixtime = calendar.timegm(data_months_datetime.utctimetuple())
+    training_commits = (session.query(Commit)
+                        .filter(
+        (Commit.repository_id == repo_id) &
+        (Commit.author_date_unix_timestamp < str(data_months_unixtime))
+    )
+                        .order_by(Commit.author_date_unix_timestamp.desc())
+                        .all())
+    testing_commits = (session.query(Commit)
+                       .filter(
+        (Commit.repository_id == repo_id) &
+        (Commit.author_date_unix_timestamp >= str(data_months_unixtime)))
+                       .all())
+    all_commits = (session.query(Commit)
+                   .filter(Commit.repository_id == repo_id)
+                   .order_by(Commit.author_date_unix_timestamp.desc()).all())
+    metrics_generator = MetricsGenerator(repo_id, training_commits, testing_commits)
+    output=metrics_generator.dumpData(all_commits)
+    logging.info("Repo " + repo_id + " finished analyzing.")
+    session.commit()  
+    session.close()
+    return output
+if __name__=="__main__":
+    offline_process("lab1","New")
+import json
+config = json.load(open('./config.json'))
+from classifier.classifier import *
+from caslogging import logging
+logging.info('Test categorization... ')
+classifier = Classifier()
+corrective_msg_1 = "fixed something"
+corrective_msg_2 = "bam, there goes a bug!"
+corrective_msg_3 = "x was wrong, but no more!"
+corrective_msg_4 = "Houston, we *had* a problem"
+corrective_msg_5 = "My watch is fun"
+corrective_msg_6 = "This is definitively NOT a you-know what!"
+assert(classifier.categorize(corrective_msg_1) == "Corrective")
+assert(classifier.categorize(corrective_msg_2) == "Corrective")
+assert(classifier.categorize(corrective_msg_3) == "Corrective")
+assert(classifier.categorize(corrective_msg_4) == "Corrective")
+assert(classifier.categorize(corrective_msg_5) != "Corrective")
+assert(classifier.categorize(corrective_msg_6) != "Corrective")
+feature_msg_1 = "new awesome thing added to that brillinat code"
+feature_msg_2 = "adding some color to this mundane gui!"
+feature_msg_3 = "Adding requirement.."
+feature_msg_4 = "This is an initial commit"
+feature_msg_5 = "Creating a new class for x,y, AND z!"
+feature_msg_6 = "This is definitively NOT a you-know what!"
+assert(classifier.categorize(feature_msg_1) == "Feature Addition")
+assert(classifier.categorize(feature_msg_2) == "Feature Addition")
+assert(classifier.categorize(feature_msg_3) == "Feature Addition")
+assert(classifier.categorize(feature_msg_4) == "Feature Addition")
+assert(classifier.categorize(feature_msg_5) == "Feature Addition")
+assert(classifier.categorize(feature_msg_6) != "Feature Addition")
+prev_msg_1 = "testing to make sure of stuff"
+prev_msg_2 = "junit rocks, stay heavy!"
+prev_msg_3 = "coverage is now much higher"
+prev_msg_4 = "asserting that our code doesn't make computers 'splode"
+prev_msg_5 = "I am totally awesome"
+assert(classifier.categorize(prev_msg_1) == "Preventative")
+assert(classifier.categorize(prev_msg_2) == "Preventative")
+assert(classifier.categorize(prev_msg_3) == "Preventative")
+assert(classifier.categorize(prev_msg_4) == "Preventative")
+assert(classifier.categorize(prev_msg_5) != "Preventative")
+corrective_msg_1 = "fixed something"
+corrective_msg_2 = "bam, there goes a bug!"
+corrective_msg_3 = "x was wrong, but no more!"
+corrective_msg_4 = "Houston, we *had* a problem"
+corrective_msg_5 = "My watch is fun"
+corrective_msg_6 = "This is definitively NOT a you-know what!"
+assert(classifier.categorize(corrective_msg_1) == "Corrective")
+assert(classifier.categorize(corrective_msg_2) == "Corrective")
+assert(classifier.categorize(corrective_msg_3) == "Corrective")
+assert(classifier.categorize(corrective_msg_4) == "Corrective")
+assert(classifier.categorize(corrective_msg_5) != "Corrective")
+assert(classifier.categorize(corrective_msg_6) != "Corrective")
+logging.info("Passed tests")
+import uuid
+from db import *
+from datetime import datetime
+class Feedback(Base):
+    __tablename__ = 'feedback'
+    id = Column(String, primary_key=True)
+    commit_hash = Column(String)
+    score = Column(Integer)
+    comment = Column(String)
+    def __init__(self, feedbackDict):
+        self.__dict__.update(feedbackDict)
+    def __repr__(self):
+        return "<Feedback id: %s>" % (self.id)
+import uuid
+from db import *
+from datetime import datetime
+class GlmCoefficients(Base):
+    __tablename__ = 'glm_coefficients'
+    repo = Column(String, primary_key=True)
+    intercept = Column(Float, unique=False, default=0)
+    intercept_sig = Column(Float)
+    ns = Column(Float, unique=False, default=0)
+    ns_sig = Column(Float)
+    nd = Column(Float, unique=False, default=0)
+    nd_sig = Column(Float)
+    nf = Column(Float, unique=False, default=0)
+    nf_sig = Column(Float)
+    entrophy = Column(Float, unique=False, default=0)
+    entrophy_sig = Column(Float)
+    la = Column(Float, unique=False, default=0)
+    la_sig = Column(Float)
+    ld = Column(Float, unique=False, default=0)
+    ld_sig = Column(Float)
+    lt = Column(Float, unique=False, default=0)
+    lt_sig = Column(Float)
+    ndev = Column(Float, unique=False, default=0)
+    ndev_sig = Column(Float)
+    age = Column(Float, unique=False, default=0)
+    age_sig = Column(Float)
+    nuc = Column(Float, unique=False, default=0)
+    nuc_sig = Column(Float)
+    exp = Column(Float, unique=False, default=0)
+    exp_sig = Column(Float)
+    rexp = Column(Float, unique=False, default=0)
+    rexp_sig = Column(Float)
+    sexp = Column(Float, unique=False, default=0)
+    sexp_sig = Column(Float)
+    def __init__(self, glmCoefficientsDict):
+        self.__dict__.update(glmCoefficientsDict)
+    def __repr__(self):
+        return "<Repository id: %s>" % (self.repo)
+from db import *
+class Commit(Base):
+    __tablename__ = 'commits'
+    commit_hash = Column(String, primary_key=True)
+    author_name  = Column(String)
+    author_date_unix_timestamp  = Column(String)
+    author_email  = Column(String)
+    author_date  = Column(String)
+    commit_message = Column(String)
+    fix = Column(String, unique=False)
+    classification = Column(String, unique=False)
+    linked = Column(Boolean, default = False)
+    contains_bug = Column(Boolean, unique=False, default=False)
+    fixes = Column(String, unique=False)
+    first_fixed_by = Column(String, unique=False, default=None)
+    unix_timestamp_first_fix = Column(String, unique=False, default=None)
+    ns = Column(Float, unique=False, default=0)
+    nd = Column(Float, unique=False, default=0)
+    nf = Column(Float, unique=False, default=0)
+    entrophy = Column(Float, unique=False, default=0)
+    la = Column(Float, unique=False, default=0)
+    ld = Column(Float, unique=False, default=0)
+    fileschanged = Column(String, unique=False, default="NULL")
+    lt = Column(Float, unique=False, default=0)
+    ndev = Column(Float, unique=False, default=0)
+    age = Column(Float, unique=False, default=0)
+    nuc = Column(Float, unique=False, default=0)
+    exp = Column(Float, unique=False, default=0)
+    rexp = Column(Float, unique=False, default=0)
+    sexp = Column(Float, unique=False, default=0)
+    glm_probability = Column(Float, unique=False, default=0)
+    repository_id = Column(String)
+    def __init__(self, commitDict):
+        self.__dict__.update(commitDict)
+    def __repr__(self):
+        return "<Commit('%s','%s', '%s', '%s')>" % \
+            (self.commit_hash,
+            self.author_name,
+            self.author_date,
+            self.commit_message)
+from db import *
+from datetime import datetime
+class Metrics(Base):
+    __tablename__ = 'metrics'
+    repo = Column(String, primary_key=True)
+    nsbuggy = Column(Float, unique=False, default=0)
+    nsnonbuggy = Column(Float, unique=False, default=0)
+    ns_sig = Column(Float)
+    ndbuggy = Column(Float, unique=False, default=0)
+    ndnonbuggy = Column(Float, unique=False, default=0)
+    nd_sig = Column(Float)
+    nfbuggy = Column(Float, unique=False, default=0)
+    nfnonbuggy = Column(Float, unique=False, default=0)
+    nf_sig = Column(Float)
+    entrophybuggy = Column(Float, unique=False, default=0)
+    entrophynonbuggy = Column(Float, unique=False, default=0)
+    entrophy_sig = Column(Float)
+    labuggy = Column(Float, unique=False, default=0)
+    lanonbuggy = Column(Float, unique=False, default=0)
+    la_sig = Column(Float)
+    ldbuggy = Column(Float, unique=False, default=0)
+    ldnonbuggy = Column(Float, unique=False, default=0)
+    ld_sig = Column(Float)
+    ltbuggy = Column(Float, unique=False, default=0)
+    ltnonbuggy = Column(Float, unique=False, default=0)
+    lt_sig = Column(Float)
+    ndevbuggy = Column(Float, unique=False, default=0)
+    ndevnonbuggy = Column(Float, unique=False, default=0)
+    ndev_sig = Column(Float)
+    agebuggy = Column(Float, unique=False, default=0)
+    agenonbuggy = Column(Float, unique=False, default=0)
+    age_sig = Column(Float)
+    nucbuggy = Column(Float, unique=False, default=0)
+    nucnonbuggy = Column(Float, unique=False, default=0)
+    nuc_sig = Column(Float)
+    expbuggy = Column(Float, unique=False, default=0)
+    expnonbuggy = Column(Float, unique=False, default=0)
+    exp_sig = Column(Float)
+    rexpnonbuggy = Column(Float, unique=False, default=0)
+    rexpbuggy = Column(Float, unique=False, default=0)
+    rexp_sig = Column(Float)
+    sexpbuggy = Column(Float, unique=False, default=0)
+    sexpnonbuggy = Column(Float, unique=False, default=0)
+    sexp_sig = Column(Float)
+    def __init__(self, metricDict):
+        self.__dict__.update(metricDict)
+    def __repr__(self):
+        return "<Metrics table: %s>" % (self.repo)
+import uuid
+from db import *
+from datetime import datetime
+class User(Base):
+    __tablename__ = 'users'
+    id = Column(String, primary_key=True)
+    email = Column(String)
+    password = Column(String)
+    def __init__(self, userDict):
+        self.__dict__.update(userDict)
+    def __repr__(self):
+        return "<User id: %s>" % (self.id)
+import uuid
+from db import *
+from datetime import datetime
+class Repository(Base):
+    __tablename__ = 'repositories'
+    id = Column(String, primary_key=True)
+    name = Column(String)
+    url = Column(String)
+    creation_date = Column(String)
+    ingestion_date = Column(String)
+    analysis_date = Column(String)
+    status = Column(String)
+    email = Column(String)
+    listed = Column(Boolean)
+    last_data_dump = Column(String)
+    def __init__(self, repoDict):
+        self.id = str(uuid.uuid1())
+        self.creation_date = str(datetime.now().replace(microsecond=0))
+        self.__dict__.update(repoDict)
+    def __repr__(self):
+        return "<Repository: %s - %s>" % (self.name, self.id)
+from orm.repository import Repository
+import argparse
+import db
+parser = argparse.ArgumentParser(description='Add repository.')
+parser.add_argument('name', help='repository name')
+parser.add_argument('url', help='repository url')
+args=parser.parse_args()
+print(args)
+session = db.Session()
+session.merge(Repository({'name':args.name, 'url':args.url, 'status':'Waiting to be Ingested'}))        
+session.commit()
+session.close()
+{
+	"db": {
+		"type":"postgresql",
+		"adapter":"psycopg2",
+		"username": "postgres",
+		"password": "123456",
+		"host": "localhost",
+		"port": "5432",
+		"database": "cas"
+	},
+	"logging_system": {
+		"filename": "CASLog.log"
+	},
+	"logging_analyzer": {
+		"filename": "Analyzer.log"
+	},
+	"gmail": {
+		"user": "USERNAME@gmail.com",
+		"pass": "PASSWORD"
+	},
+	"repoUpdates": {
+		"freqInDays": "2"
+	},
+	"system": {
+		"workers": "2"
+	},
+	"github": {
+		"user": "example_user",
+		"pass": "PASSWORD"
+	},
+	"glm_modeling":{
+		"months": "3"
+	},
+	"data_dumps": {
+		"location": "/home/czw/datasets/"
+	}
+}
+{
+	"db": {
+		"type":"postgresql",
+		"adapter":"psycopg2",
+		"username": "USERNAME",
+		"password": "PASSWORD",
+		"host": "localhost",
+		"port": "5432",
+		"database": "cas"
+	},
+	"logging_system": {
+		"filename": "CASLog.log"
+	},
+	"logging_analyzer": {
+		"filename": "Analyzer.log"
+	},
+	"gmail": {
+		"user": "USERNAME@gmail.com",
+		"pass": "PASSWORD"
+	},
+	"repoUpdates": {
+		"freqInDays": "FREQUENCY IN DAYS"
+	},
+	"system": {
+		"workers": "NUMBER OF WORKER THREADS"
+	},
+	"github": {
+		"user": "example_user",
+		"pass": "PASSWORD"
+	},
+	"glm_modeling":{
+		"months": "3"
+	},
+	"data_dumps": {
+		"location": "THE FULL PATH TO /analyzer/datasets"
+	}
+}
+from config import config
+import logging as root_logging
+logger = root_logging.getLogger()
+logger.setLevel(root_logging.INFO)
+logger_format = root_logging.Formatter('%(asctime)s %(levelname)s: %(message)s', '%Y-%m-%d %H:%M:%S')
+logging_file_handler = root_logging.FileHandler(config['logging_system']['filename'])
+logging_file_handler.setLevel(root_logging.INFO)
+logging_file_handler.setFormatter(logger_format)
+logger.addHandler(logging_file_handler)
+logging_stream_handler = root_logging.StreamHandler()
+logging_stream_handler.setLevel(root_logging.INFO)
+logging_stream_handler.setFormatter(logger_format)
+logger.addHandler(logging_stream_handler)
+logging = root_logging
+from analyzer.analyzer import *
+from ingester.ingester import *
+from orm.repository import *
+import calendar 
+from caslogging import logging
+from queue import *
+import threading
+import time
+from monthdelta import MonthDelta
+class CAS_Manager(threading.Thread):
+	def __init__(self):
+		threading.Thread.__init__(self)
+		numOfWorkers = int(config['system']['workers'])
+		self.workQueue = ThreadPool(numOfWorkers)
+		self.modelQueue = Queue()
+	def checkIngestion(self):
+		logging.info("check ingested")
+		session = Session()
+		repo_update_freq = int(config['repoUpdates']['freqInDays'])
+		refresh_date = str(datetime.utcnow() - timedelta(days=repo_update_freq))
+		repos_to_get = (session.query(Repository) 
+							.filter( 
+								(Repository.status == "Waiting to be Ingested") | 
+								(Repository.ingestion_date < refresh_date) &
+								(Repository.status != "Error") &
+								(Repository.status != "Analyzing"))
+							.all())
+		for repo in repos_to_get:
+			logging.info("Adding repo " + repo.id + " to work queue for ingesting")
+			repo.status = "In Queue to be Ingested"
+			session.commit() 
+			ingest(repo.id)
+		session.close()
+	def checkAnalyzation(self):
+		logging.info("check analyzation")
+		session = Session()
+		repo_update_freq = int(config['repoUpdates']['freqInDays'])
+		refresh_date = str(datetime.utcnow() - timedelta(days=repo_update_freq))
+		repos_to_get = (session.query(Repository)
+						  .filter( (Repository.status == "Waiting to be Analyzed") )
+						  .all()
+						)
+		for repo in repos_to_get:
+			logging.info("Adding repo " + repo.id + " to work queue for analyzing.")
+			repo.status = "In Queue to be Analyzed"
+			session.commit() 
+			analyze(repo.id)
+		session.close()
+	def checkModel(self):
+		logging.info("check Model")
+		session = Session()
+		repos_to_get = (session.query(Repository) 
+							.filter( 
+								(Repository.status == "In Queue to Build Model") )
+							.all())
+		for repo in repos_to_get:
+			logging.info("Adding repo " + repo.id + " to model queue to finish analyzing")
+			repo.status = "Building Model"
+			session.commit() 
+			self.modelQueue.put(repo.id)
+		session.close()
+	def checkBuildModel(self):
+		session = Session()
+		logging.info("check build Model")
+		if self.modelQueue.empty() != True:
+			repo_id = self.modelQueue.get()
+			repo = (session.query(Repository).filter(Repository.id == repo_id).first())
+			glm_model_time =  int(config['glm_modeling']['months']) 
+			data_months_datetime = datetime.utcnow() - MonthDelta(glm_model_time)
+			data_months_unixtime = calendar.timegm(data_months_datetime.utctimetuple())
+			training_commits = (session.query(Commit)
+						.filter( 
+							( Commit.repository_id == repo_id ) &
+							( Commit.author_date_unix_timestamp < str(data_months_unixtime))
+						)
+						.order_by( Commit.author_date_unix_timestamp.desc() )
+						.all())
+			testing_commits = (session.query(Commit)
+						.filter(
+							( Commit.repository_id == repo_id ) &
+							( Commit.author_date_unix_timestamp >= str(data_months_unixtime)))
+						.all())
+			try: 
+				all_commits=(session.query(Commit)
+		 .filter(Commit.repository_id==repo_id)
+		 .order_by(Commit.author_date_unix_timestamp.desc()).all())
+				metrics_generator = MetricsGenerator(repo_id, training_commits, testing_commits)
+				metrics_generator.dumpData(all_commits)
+				logging.info("Repo " + repo_id + " finished analyzing.")
+				repo.analysis_date = str(datetime.now().replace(microsecond=0))
+				repo.status = "Analyzed"
+				session.commit() 
+				session.close()
+			except Exception as e:
+				logging.exception("Got an exception building model for repository " + repo_id)
+				repo.status = "Error"
+				session.commit() 
+				session.close()
+	def notify(self, repo):
+		notify = False
+		notifier = None
+		logging.info("Notifying subscribed users for repository " + repo.id)
+		gmail_user = config['gmail']['user']
+		gmail_pass = config['gmail']['pass']
+		notifier = Notifier(gmail_user, gmail_pass, repo.name)
+		if repo.email is not None:
+			notifier.addSubscribers([repo.email, gmail_user])
+		else:
+			notifier.addSubscribers([gmail_user])
+		notifier.notify()
+	def run(self):
+		print("---------------CAS is running------------")
+		logging.info("---this is one Loop---")
+		self.checkIngestion()
+		self.checkAnalyzation()
+		self.checkModel()
+		self.checkBuildModel()
+class Worker(threading.Thread):
+	def __init__(self, tasks):
+		threading.Thread.__init__(self)
+		self.tasks = tasks
+		self.daemon = True
+		self.start()
+	def run(self):
+		while True:
+			func, args, kargs = self.tasks.get()
+			try:
+				func(*args, **kargs)
+			except Exception as e:
+				print(e)
+			self.tasks.task_done()
+class ThreadPool:
+	def __init__(self, num_threads):
+		self.tasks = Queue(num_threads)
+		for _ in range(num_threads): Worker(self.tasks)
+	def add_task(self, func, *args, **kargs):
+		self.tasks.put((func, args, kargs))
+	def wait_completion(self):
+		self.tasks.join()
+import os
+import subprocess
+import json
+import logging
+import math                               
+from ingester.commitFile import *         
+from classifier.classifier import *       
+import time
+import re
+import ingester.commit
+import gc
+from orm.commit import *
+from datetime import datetime
+import copy
+class Git():
+    LOG_FORMAT = '--pretty=format:\" CAS_READER_STARTPRETTY\
+    \\"parent_hashes\\"CAS_READER_PROP_DELIMITER: \\"%P\\",CAS_READER_PROP_DELIMITER2\
+    \\"commit_hash\\"CAS_READER_PROP_DELIMITER: \\"%H\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_name\\"CAS_READER_PROP_DELIMITER: \\"%an\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_email\\"CAS_READER_PROP_DELIMITER: \\"%ae\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_date\\"CAS_READER_PROP_DELIMITER: \\"%ad\\",CAS_READER_PROP_DELIMITER2\
+    \\"author_date_unix_timestamp\\"CAS_READER_PROP_DELIMITER: \\"%at\\",CAS_READER_PROP_DELIMITER2\
+    \\"commit_message\\"CAS_READER_PROP_DELIMITER: \\"%s%b\\"\
+    CAS_READER_STOPPRETTY \" --numstat --reverse '
+    CLONE_CMD = 'git clone {!s} {!s}'     
+    PULL_CMD = 'git pull'      
+    RESET_CMD = 'git reset --hard FETCH_HEAD'
+    CLEAN_CMD = 'git clean -df' 
+    REPO_DIRECTORY = "/CASRepos/git/"        
+    def getCommitStatsProperties(self,stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp ):
+        statProperties = ""
+        subsystemsSeen = []                         
+        directoriesSeen = []                        
+        locModifiedPerFile = []                     
+        authors = []                                
+        fileAges = []                               
+        la = 0                                      
+        ld = 0                                      
+        nf = 0                                      
+        ns = 0                                      
+        nd = 0                                      
+        entrophy = 0                                
+        lt = 0                                      
+        ndev = 0                                    
+        age = 0                                     
+        exp = 0                                     
+        rexp = 0                                    
+        sexp = 0                                    
+        totalLOCModified = 0                        
+        nuc = 0                                     
+        filesSeen = ""                              
+        for stat in stats:
+            if( stat == ' ' or stat == '' ):
+                continue
+            fileStat = stat.split("\t") 
+            if( len(fileStat) < 2):
+                continue
+            try:
+                fileLa = int(fileStat[0])
+                fileLd = int(fileStat[1])
+            except:
+                fileLa = 0
+                fileLd = 0
+            fileName = (fileStat[2].replace("'",'').replace('"','').replace("\\",""))
+            totalModified = fileLa + fileLd
+            if(fileName in commitFiles):
+                prevFileChanged = commitFiles[fileName]
+                prevLOC = getattr(prevFileChanged, 'loc')
+                prevAuthors = getattr(prevFileChanged, 'authors')
+                prevChanged = getattr(prevFileChanged, 'lastchanged')
+                file_nuc = getattr(prevFileChanged, 'nuc')
+                nuc += file_nuc
+                lt += prevLOC
+                for prevAuthor in prevAuthors:
+                    if prevAuthor not in authors:
+                        authors.append(prevAuthor)
+                age += ( (int(unixTimeStamp) - int(prevChanged)) / 86400 )
+                fileAges.append(prevChanged)
+                file_nuc += 1 
+                setattr(prevFileChanged, 'loc', prevLOC + fileLa - fileLd)
+                setattr(prevFileChanged, 'authors', authors)
+                setattr(prevFileChanged, 'lastchanged', unixTimeStamp)
+                setattr(prevFileChanged, 'nuc', file_nuc)
+            else:
+                if(author not in authors):
+                    authors.append(author)
+                if(unixTimeStamp not in fileAges):
+                    fileAges.append(unixTimeStamp)
+                fileObject = CommitFile(fileName, fileLa - fileLd, authors, unixTimeStamp)
+                commitFiles[fileName] = fileObject
+            locModifiedPerFile.append(totalModified) 
+            totalLOCModified += totalModified
+            fileDirs = fileName.split("/")
+            if( len(fileDirs) == 1 ):
+                subsystem = "root"
+                directory = "root"
+            else:
+                subsystem = fileDirs[0]
+                directory = "/".join(fileDirs[0:-1])
+            if( subsystem not in subsystemsSeen ):
+                subsystemsSeen.append( subsystem )
+            if( author in devExperience ):
+                experiences = devExperience[author]
+                exp += sum(experiences.values())
+                if( subsystem in experiences ):
+                    sexp = experiences[subsystem]
+                    experiences[subsystem] += 1
+                else:
+                    experiences[subsystem] = 1
+                try:
+                    rexp += (1 / (age) + 1)
+                except:
+                    rexp += 0
+            else:
+                devExperience[author] = {subsystem: 1}
+            if( directory not in directoriesSeen ):
+                directoriesSeen.append( directory )
+            la += fileLa
+            ld += fileLd
+            nf += 1
+            filesSeen += fileName + ",CAS_DELIMITER,"
+        if( nf < 1):
+            return ""
+        ns = len(subsystemsSeen)
+        nd = len(directoriesSeen)
+        ndev = len(authors)
+        lt = lt / nf
+        age = age / nf
+        exp = exp / nf
+        rexp = rexp / nf
+        for fileLocMod in locModifiedPerFile:
+            if (fileLocMod != 0 ):
+                avg = fileLocMod/totalLOCModified
+                entrophy -= ( avg * math.log( avg,2 ) )
+        statProperties += ',"la":"' + str( la ) + '\"'
+        statProperties += ',"ld":"' + str( ld ) + '\"'
+        statProperties += ',"fileschanged":"' + filesSeen[0:-1] + '\"'
+        statProperties += ',"nf":"' + str( nf ) + '\"'
+        statProperties += ',"ns":"' + str( ns ) + '\"'
+        statProperties += ',"nd":"' + str( nd ) + '\"'
+        statProperties += ',"entrophy":"' + str(  entrophy ) + '\"'
+        statProperties += ',"ndev":"' + str( ndev ) + '\"'
+        statProperties += ',"lt":"' + str( lt ) + '\"'
+        statProperties += ',"nuc":"' + str( nuc ) + '\"'
+        statProperties += ',"age":"' + str( age ) + '\"'
+        statProperties += ',"exp":"' + str( exp ) + '\"'
+        statProperties += ',"rexp":"' + str( rexp ) + '\"'
+        statProperties += ',"sexp":"' + str( sexp ) + '\"'
+        return statProperties
+    def log(self, repo, firstSync):
+        repo_dir = os.chdir(os.path.dirname(__file__)+'/ingester' + self.REPO_DIRECTORY + '0')
+        logging.info('Getting/parsing git commits: test repo 0')
+        commitStructure=dict()
+        cmd2= 'git log --format=%H,%P --reverse'
+        log = str( subprocess.check_output(cmd2, shell=True, cwd =repo_dir).decode("utf8") )
+        info=log.split("\n")
+        print(f"-----Staring create structure-----")
+        for data in info:
+            if data=="":
+                continue
+            c=ingester.commit.Commit()
+            d=data.split(',')
+            c.hash_code=d[0]
+            c.parent_hash=d[1].split(" ")
+            commitStructure[c.hash_code]=c
+        for data in info:
+            if data=="":
+                continue
+            d=data.split(',')
+            c=commitStructure[d[0]]
+            if(len(c.parent_hash)==2):
+                c.Is_merge=True
+                commitStructure[c.parent_hash[0]].followCommit.append(c.hash_code)
+                commitStructure[c.parent_hash[1]].followCommit.append(c.hash_code)
+            elif(c.parent_hash[0]!=""):
+                c2=commitStructure[c.parent_hash[0]]
+                c2.followCommit.append(c.hash_code)
+                if(len(commitStructure[c.parent_hash[0]].followCommit)>=2):
+                    commitStructure[c.parent_hash[0]].Is_branch_start=True
+        print('-----Structure init done-----')
+        print('-----Starting check stats-----')
+        cmd = 'git log --encoding="utf-8" '
+        log = str( subprocess.check_output(cmd + self.LOG_FORMAT, shell=True, cwd = repo_dir ).decode("utf8") ) 
+        if len(log) == 0:
+            return []
+        commitFiles = {}            
+        devExperience = {}          
+        classifier = Classifier()   
+        commitList = log.split("CAS_READER_STARTPRETTY")
+        times=0
+        print('-----Stats check over-----')
+        sizee=len(commitList)
+        print(f"当前项目的提交数量为：{sizee}")
+        print('-----Starting feature extracttion-----')
+        gc.enable()
+        def Mytest(commit):
+            nonlocal times,sizee,commitFiles,commitStructure,devExperience,classifier
+            print(f"处理第{times}项,当前进度{(times/sizee)*100}%")
+            times+=1
+            author = ""                                 
+            unixTimeStamp = 0                           
+            fix = False                                 
+            classification = None                       
+            isMerge = False                             
+            hash_code=''
+            parents=[]
+            splitCommitStat = commit.split("CAS_READER_STOPPRETTY")  
+            if(len(splitCommitStat) < 2):
+                return ""
+            prettyCommit = splitCommitStat[0]
+            statCommit = splitCommitStat[1]
+            commitObject = ""
+            prettyInfo = prettyCommit.split(',CAS_READER_PROP_DELIMITER2    "')
+            for propValue in prettyInfo:
+                props = propValue.split('"CAS_READER_PROP_DELIMITER: "',1)
+                values = []
+                for prop in props:
+                    prop = prop.replace('\\','').replace("\\n", '')  
+                    while prop.startswith("\b"):
+                          prop = prop.replace("\b",'',1) 
+                    values.append('"'+prop.replace('"','')+'"')
+                if(values[0] == '"    parent_hashes"'):
+                    parents = values[1].strip("'\"").split(' ')
+                    if len(parents) == 2:
+                        isMerge = True
+                if(values[0] == '"commit_hash"'):
+                    hash_code = values[1].replace('"', '')
+                if(values[0] == '"author_name"'):
+                    author = values[1].replace('"', '')
+                if(values[0] == '"author_date_unix_timestamp"'):
+                    unixTimeStamp = values[1].replace('"','')
+                if(values[0] == '"commit_message"'):
+                    if (isMerge):
+                        classification = "Merge"
+                    else:
+                        classification = classifier.categorize(values[1].lower())
+                    if classification == "Corrective":
+                        fix = True
+                commitObject += "," + ":".join(values).replace("\n","\\n").replace("\t","\\t").replace("\r","\\r") 
+                commitObject = commitObject.replace("\x09"," ").replace('\x08', ' ').replace("\x07", " ").replace("\x06"," ").replace("\x05"," ").replace("\x04"," ").replace("\x03"," ").replace("\x02"," ").replace("\x01"," ").replace("\x00"," ") 
+            stats = statCommit.split("\n") 
+            c=commitStructure[hash_code]
+            if(c.Is_merge==False):
+                if(parents[0]==""):
+                    my_files=dict()
+                else:
+                    p=commitStructure[parents[0]]
+                    my_files=p.get_dict()
+                    p.release_memory()
+                if(my_files==None):
+                    my_files=copy.deepcopy(commitFiles)
+                commitObject+=self.getCommitStatsProperties(stats,my_files, devExperience,hash_code,parents, author, unixTimeStamp)
+                c.update_dict(my_files)
+                self.getCommitStatsProperties(stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp)
+            else:
+                commitObject += self.getCommitStatsProperties(stats,commitFiles, devExperience,hash_code,parents, author, unixTimeStamp)
+                c.update_dict(commitFiles)
+                p1=commitStructure[parents[0]]
+                p2=commitStructure[parents[1]]
+                if p1.file_dict!=None:
+                    p1.file_dict.clear()
+                if p2.file_dict!=None:
+                    p2.file_dict.clear()
+                p1.release_memory()
+                p2.release_memory()
+            commitObject += ',"classification":"' + str( classification ) + '\"'
+            commitObject += ',"fix":"' + str( fix ) + '\"'
+            commitObject = commitObject[1:].replace('    ','')
+            return commitObject
+        json_list=list(map(Mytest,commitList))
+        return json_list
+        logging.info('Done getting/parsing git commits.')
+    def getJsonList(self):
+        json_list=[]
+        for commitObject in self.log(None,False):
+            json_list.append(json.loads('{' + commitObject + '}'))
+        return json_list
+    def clone(self, repo):
+        repo_dir = os.chdir(os.path.dirname(__file__) + self.REPO_DIRECTORY)
+        logging.info('Git cloning repo: '+ str(repo) )
+        cloneResult = str(subprocess.check_output(
+                  self.CLONE_CMD.format(repo.url, './' + repo.id),
+                  shell= True,
+                  cwd = repo_dir ) )
+        logging.info('Done cloning.')
+        return True
+    def pull(self, repo):
+        repo_dir = os.path.dirname(__file__) + self.REPO_DIRECTORY + repo.id
+        subprocess.call(self.RESET_CMD, shell=True, cwd= repo_dir)
+        subprocess.call(self.CLEAN_CMD, shell=True, cwd= repo_dir)
+        logging.info('Pulling latest changes from repo: '+ str(repo) )
+        fetchResult = str(subprocess.check_output(
+                  self.RESET_CMD + "\n" + self.PULL_CMD ,
+                  shell=True,
+                  cwd=  repo_dir  ) )
+        logging.info('Done fetching.')
+        return True
+if __name__=='__main__':
+    git=Git()
+    commits = git.log(None,False)
+    commitsSession = Session()
+    logging.info('Saving commits to the database...')
+    for commitDict in commits:
+        commitDict['repository_id'] = '0'
+        commitsSession.merge(Commit(commitDict))
+    commitsSession.commit()
+    commitsSession.close()
+    logging.info('Done saving commits to the database.')
+from config import *
+import sqlalchemy
+from sqlalchemy import *
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+Session = sessionmaker()
+connection_args = []
+connection_args.append(config['db']['type'])
+if config['db']['adapter']:
+	connection_args.extend(['+',config['db']['adapter']])
+connection_args.append('://')
+if config['db']['username']:
+	connection_args.append(config['db']['username'])
+	if config['db']['password']:
+		connection_args.extend([':',config['db']['password']])
+	connection_args.append('@')
+if config['db']['host']:
+	connection_args.append(config['db']['host'])
+	if config['db']['port']:
+		connection_args.extend([':',config['db']['port']])
+connection_args.extend(['/',config['db']['database']])
+engine = sqlalchemy.create_engine(''.join(connection_args)) 
+Session.configure(bind=engine)
+Base = declarative_base()
+class RepositoryMetrics:
+  def __init__(self):
+    self.ns_buggy = []
+    self.ns_nonbuggy = []
+    self.nd_buggy = []
+    self.nd_nonbuggy = []
+    self.nf_buggy = []
+    self.nf_nonbuggy = []
+    self.entrophy_buggy = []
+    self.entrophy_nonbuggy = []
+    self.la_buggy = []
+    self.la_nonbuggy = []
+    self.ld_buggy = []
+    self.ld_nonbuggy = []
+    self.lt_buggy = []
+    self.lt_nonbuggy = []
+    self.ndev_buggy = []
+    self.ndev_nonbuggy = []
+    self.age_buggy = []
+    self.age_nonbuggy = []
+    self.nuc_buggy = []
+    self.nuc_nonbuggy = []
+    self.exp_buggy = []
+    self.exp_nonbuggy = []
+    self.rexp_nonbuggy = []
+    self.rexp_buggy = []
+    self.sexp_buggy = []
+    self.sexp_nonbuggy = []
+    self.num_buggy = 0
+    self.num_nonbuggy = 0
+from analyzer.repositorymetrics import * 
+from db import *	
+from orm.metrics import *	
+from caslogging import logging
+class MedianModel:
+  def __init__(self, metrics, repo_id):
+    self.metrics = metrics
+    self.repo_id = repo_id
+    self.psig = 0.05
+  def buildModel(self):
+    self.calculateMedians()
+  def getMedian(self,metric):
+    median_props = ""
+    try:
+      metric_buggy = getattr(self.metrics, metric + "_buggy")
+      metric_nonbuggy = getattr(self.metrics, metric + "_nonbuggy")
+      pvalue = self.wilcoxFn(robjects.FloatVector(metric_buggy), robjects.FloatVector(metric_nonbuggy))[2][0]
+      buggy_median = self.medianFn(robjects.FloatVector(metric_buggy))
+      nonbuggy_median = self.medianFn(robjects.FloatVector(metric_nonbuggy))
+      median_props += '"' + metric + 'buggy":"' + str(buggy_median[0]) + '", '
+      median_props += '"' + metric + 'nonbuggy":"' + str(nonbuggy_median[0]) + '", '
+      if pvalue <= self.psig:
+        median_props += '"' + metric + '_sig":"1", '
+      else:
+        median_props += '"' + metric + '_sig":"0", '
+    except:
+      logging.info("Metric " + metric + " could not be used in the median model for repo " + self.repo_id)
+    return median_props
+  def calculateMedians(self):
+    metricObject = '"repo":"' + self.repo_id + '", '
+    metricObject += self.getMedian("ns")
+    metricObject += self.getMedian("nd")
+    metricObject += self.getMedian("nf")
+    metricObject += self.getMedian("entrophy")
+    metricObject += self.getMedian("la")
+    metricObject += self.getMedian("ld")
+    metricObject += self.getMedian("lt")
+    metricObject += self.getMedian("ndev")
+    metricObject += self.getMedian("age")
+    metricObject += self.getMedian("nuc")
+    metricObject += self.getMedian("exp")
+    metricObject += self.getMedian("rexp")
+    metricObject += self.getMedian("sexp")
+    metricObject = metricObject[:-2]
+    metricsSession = Session()
+    metrics = Metrics(json.loads('{' + metricObject + '}'))
+    metricsSession.merge(metrics)
+    metricsSession.commit()
+import requests, json, dateutil.parser, time
+from caslogging import logging
+from config import *
+class GithubIssueTracker:
+	owner = None											
+	repo = None												
+	request_repos = "https://api.github.com/repos"			
+	request_auth = "https://api.github.com/authorizations" 	
+	def __init__(self, owner, repo):
+		self.owner = owner
+		self.repo = repo
+		self.auth_token = None
+		self.authenticate() 
+	def authenticate(self):
+		s = requests.Session()
+		username = config["github"]["user"]
+		password = config["github"]["pass"]
+		s.auth = (username, password)
+		payload = {"scopes": ["repo"]}
+		r = s.get(self.request_auth, params=payload)
+		if r.headers.get('x-ratelimit-remaining') == '0':
+			logging.info("Github quota limit hit -- waiting")
+			while r.headers.get('x-ratelimit-remaining') == '0':
+				time.sleep(600) 
+				r = s.get(self.request_auth, params=payload)
+				data = r.json()
+		data = r.json()[0]
+		if r.status_code >= 400:
+			msg = data.get('message')
+			logging.error("Failed to authenticate issue tracker: \n" +msg)
+			return 
+		else:
+			self.auth_token = data.get("token")
+			requests_left = r.headers.get('x-ratelimit-remaining')
+			logging.info("Analyzer has " + requests_left + " issue tracker calls left this hour")
+	def getDateOpened(self, issueNumber):
+		logging.info("searching for issue: " + str(issueNumber))
+		logging.info(self.request_repos + "/" + self.owner + "/" +
+				self.repo + "/issues/" + issueNumber)
+		header = {'Authorization': 'token ' + self.auth_token}
+		r = requests.get(self.request_repos + "/" + self.owner + "/" +
+				self.repo + "/issues/" + issueNumber, headers=header)
+		data = r.json()
+		if r.status_code == 403:
+			if r.headers.get('x-ratelimit-remaining') == '0':
+				logging.info("Github quota limit hit -- waiting")
+				while r.headers.get('x-ratelimit-remaining') == '0':
+					time.sleep(600) 
+					r = requests.get(self.request_repos + "/" + self.owner + "/" +
+						self.repo + "/issues/" + issueNumber, headers=header)
+					data = r.json()
+		elif r.status_code >= 400:
+			msg = data.get('message')
+			logging.info("issue not found")
+			return None
+		else:
+			try:
+				date = (dateutil.parser.parse(data.get('created_at'))).timestamp()
+				return date
+			except:
+				logging.error("ISSUE TRACKER FAILURE: Could not get created_at from github issues API")
+				return None
+from analyzer.repositorymetrics import * 
+from analyzer.medianmodel import * 
+from analyzer.linear_reg_model import *
+from orm.commit import *
+import json
+class MetricsGenerator:
+	def __init__(self, repo_id, trainingData, testData):
+		self.repo_id = repo_id
+		self.trainingData = trainingData
+		self.testData = testData
+		self.metrics = RepositoryMetrics()
+	def buildAllModels(self):
+		self.fetchAllMetrics() 
+		median_model = MedianModel(self.metrics, self.repo_id)
+		linear_reg_model = LinearRegressionModel(self.metrics, self.repo_id, self.testData)
+		median_model.buildModel() 
+		linear_reg_model.buildModel() 
+	def dumpData(self, commits):
+		current_dir = os.path.dirname(__file__)
+		if config['data_dumps']['location'] != None or config['data_dumps']['location'] == "":
+			dir_of_datasets = config['data_dumps']['location']
+		else:
+			dir_of_datasets = current_dir + "/datasets/monthly/"
+		with open(dir_of_datasets + self.repo_id + ".csv", "w", encoding="utf-8-sig") as file:
+			csv_writer = csv.writer(file, dialect="excel")
+			columns = Commit.__table__.columns.keys()
+			csv_writer.writerow(columns)
+			for commit in commits:
+				commit_data = []
+				for col in columns:
+					commit_data.append(getattr(commit,col))
+				csv_writer.writerow(commit_data)
+		return dir_of_datasets + self.repo_id + ".csv"
+	def fetchAllMetrics(self):
+		for commit in self.trainingData:
+			if commit.classification == "Merge" and commit.la == 0 and commit.ld == 0:
+				continue
+			else:
+				if commit.contains_bug == True:
+					self.metrics.ns_buggy.append(commit.ns)
+					self.metrics.nd_buggy.append(commit.nd)
+					self.metrics.nf_buggy.append(commit.nf)
+					self.metrics.entrophy_buggy.append(commit.entrophy)
+					self.metrics.la_buggy.append(commit.la)
+					self.metrics.ld_buggy.append(commit.ld)
+					self.metrics.lt_buggy.append(commit.lt)
+					self.metrics.ndev_buggy.append(commit.ndev)
+					self.metrics.age_buggy.append(commit.age)
+					self.metrics.nuc_buggy.append(commit.nuc)
+					self.metrics.exp_buggy.append(commit.exp)
+					self.metrics.rexp_buggy.append(commit.rexp)
+					self.metrics.sexp_buggy.append(commit.sexp)
+					self.metrics.num_buggy += 1
+				else:
+					self.metrics.ns_nonbuggy.append(commit.ns)
+					self.metrics.nd_nonbuggy.append(commit.nd)
+					self.metrics.nf_nonbuggy.append(commit.nf)
+					self.metrics.entrophy_nonbuggy.append(commit.entrophy)
+					self.metrics.la_nonbuggy.append(commit.la)
+					self.metrics.ld_nonbuggy.append(commit.ld)
+					self.metrics.lt_nonbuggy.append(commit.lt)
+					self.metrics.ndev_nonbuggy.append(commit.ndev)
+					self.metrics.age_nonbuggy.append(commit.age)
+					self.metrics.nuc_nonbuggy.append(commit.nuc)
+					self.metrics.exp_nonbuggy.append(commit.exp)
+					self.metrics.rexp_nonbuggy.append(commit.rexp)
+					self.metrics.sexp_nonbuggy.append(commit.sexp)
+					self.metrics.num_nonbuggy += 1
+import re
+import os
+import subprocess
+from orm.commit import *
+from caslogging import logging
+import json
+import re
+from collections import defaultdict 
+class GitCommitLinker:
+  REPO_DIR = "ingester/CASRepos/git/" 
+  def __init__(self, repoId):
+    self.repo_path = os.path.join(os.path.dirname(__file__), '..', self.REPO_DIR + repoId)
+    self.repo_id = repoId
+  def linkCorrectiveCommits(self, corrective_commits, all_commits):
+    linked_commits = {} 
+    first_fixed_by = {} 
+    for corrective_commit in corrective_commits:
+      buggy_commits = self._linkCorrectiveCommit(corrective_commit)
+      for buggy_commit in buggy_commits:
+        if buggy_commit in linked_commits:
+          linked_commits[buggy_commit].append(corrective_commit.commit_hash)
+        else:
+          linked_commits[buggy_commit] = [corrective_commit.commit_hash]
+        if buggy_commit not in first_fixed_by or corrective_commit.author_date_unix_timestamp < first_fixed_by[buggy_commit].author_date_unix_timestamp:
+          first_fixed_by[buggy_commit] = corrective_commit
+      corrective_commit.linked = True 
+    for commit in all_commits:
+      if commit.commit_hash in linked_commits:
+        commit.contains_bug = True
+        commit.fixes = json.dumps(linked_commits[commit.commit_hash])
+        commit.first_fixed_by = first_fixed_by[commit.commit_hash].commit_hash 
+        commit.unix_timestamp_first_fix = first_fixed_by[commit.commit_hash].author_date_unix_timestamp 
+  def _linkCorrectiveCommit(self, commit):
+    region_chunks = self.getModifiedRegions(commit)
+    logging.info("Linkage for commit " + commit.commit_hash)
+    for k,v in region_chunks.items():
+      logging.info("-- file: " + k)
+      logging.info("---- loc modified: " + str(v))
+    bug_introducing_changes = self.gitAnnotate(region_chunks, commit)
+    return bug_introducing_changes
+  def _getModifiedRegionsOnly(self, diff, files_modified):
+    region_diff = {}
+    list_ext_dir = os.path.join(os.path.dirname(__file__), "code_file_extentions.txt")
+    file_exts_to_include = open(list_ext_dir).read().splitlines()
+    for file in files_modified:
+      if file != "'" and file != "":
+        file_info = file.split(".")
+        if len(file_info) > 1:
+          file_ext = (file_info[1]).lower()
+          if file_ext.upper() in file_exts_to_include:
+            region_diff[file] = []
+    regions = diff.split("diff --git")[1:] 
+    for region in regions:
+      chunks_initial = region.split(":CAS_DELIMITER_START:@@")
+      if len(chunks_initial) == 1:
+        continue
+      file_info = chunks_initial[0] 
+      file_info_split = file_info.split(" ")
+      file_name = file_info_split[1][2:] 
+      if file_name == None or file_name not in region_diff:
+        continue
+      for chunk in range(1, len(chunks_initial), 1):
+        code_info_chunk = chunks_initial[chunk].split("@@",1) 
+        line_info = code_info_chunk[0] 
+        code_info = code_info_chunk[1] 
+        mod_line_info = line_info.split(" ")[1] 
+        mod_code_info = code_info.replace("\\n","").split(":CAS_DELIMITER:")[1:-1] 
+        if mod_line_info[0] != '-':
+          continue
+        if mod_line_info.find(",") != -1:
+          mod_line_info = mod_line_info[0:mod_line_info.find(",")]
+        current_line = abs(int(mod_line_info)) 
+        for section in mod_code_info:
+          if section.startswith(":CAS_DELIMITER_START:-"):
+            region_diff[file_name].append(str(current_line))
+            current_line += 1 
+    return region_diff
+  def getModifiedRegions(self, commit):
+    diff_cmd = "git diff " + commit.commit_hash + "^ "+ commit.commit_hash + " --unified=0 " \
+      + ' | while read; do echo ":CAS_DELIMITER_START:$REPLY:CAS_DELIMITER:"; done'
+    try:
+      diff = str(subprocess.check_output(diff_cmd, shell=True, cwd= self.repo_path, executable="/bin/bash" ))
+      diff_cmd_lines_changed = "git diff " + commit.commit_hash + "^ "+ commit.commit_hash + " --name-only"
+      files_modified = str( subprocess.check_output( diff_cmd_lines_changed, shell=True, cwd= self.repo_path )).replace("b'", "").split("\\n")
+      return self._getModifiedRegionsOnly(diff, files_modified)
+    except:
+      return {}
+  def gitAnnotate(self, regions, commit):
+    bug_introducing_changes = []
+    for file, lines in regions.items():
+      for line in lines:
+        if line != 0 and line != "0" :
+          buggy_change = str( subprocess.check_output( "git blame -L" + line + ",+1 " + commit.commit_hash + "^ -l -- '" \
+                            + file + "'", shell=True, cwd= self.repo_path )).split(" ")[0][2:]
+          if buggy_change not in bug_introducing_changes:
+            bug_introducing_changes.append(buggy_change)
+    return bug_introducing_changes
+import smtplib
+from caslogging import logging
+class Notifier:
+	def __init__(self, gmail_user, gmail_pwd, repo):
+		self.gmail_user = gmail_user
+		self.gmail_pwd = gmail_pwd
+		self.repo = repo
+		self.subscribers = []
+	def addSubscribers(self, users):
+		self.subscribers = users
+	def notify(self):
+		FROM = "cas.notifier@gmail.com"
+		TO = self.subscribers
+		SUBJECT = "Your repository has been analyzed"
+		TEXT = "Your analyzed repository is now ready to be viewed at http://kiwi.se.rit.edu/repo/" + self.repo
+		message =  % (FROM, ", ".join(TO), SUBJECT, TEXT)
+		try:
+			server = smtplib.SMTP("smtp.gmail.com", 587)
+			server.ehlo()
+			server.starttls()
+			server.login(self.gmail_user, self.gmail_pwd) 
+			server.sendmail(FROM, TO, message)
+			server.quit()
+			logging.info("Notification sent successfully")
+		except:
+			logging.error("Failed to send notification")
+import re
+from orm.commit import *
+from caslogging import logging
+from analyzer.git_commit_linker import *
+class BugFinder:
+	def __init__(self, allCommits, correctiveCommits, issueTracker):
+		self.allCommits = allCommits
+		self.correctiveCommits = correctiveCommits
+		self.issueTracker = issueTracker
+	def findIssueOpened(self, correctiveCommit):
+		issue_opened = None
+		if(self.issueTracker is None or hasattr(self.issueTracker, "getDateOpened") == False):
+			return None
+		idMatch = re.compile('
+		issue_ids = idMatch.findall(correctiveCommit.commit_message)
+		issue_ids = [issue_id.strip('
+		if len(issue_ids) > 0:
+			issue_opened = self.issueTracker.getDateOpened(issue_ids[0])
+			for issue_id in issue_ids:
+				logging.info('Searching for issue id: ' + issue_id)
+				curr_issue_opened = self.issueTracker.getDateOpened(issue_id)
+				if curr_issue_opened is not None:
+					if int(curr_issue_opened) < int(issue_opened):
+						issue_opened = curr_issue_opened
+		return issue_opened
+	def searchForBuggyCommit(self, correctiveCommit):
+		bug_introduced_prior = correctiveCommit.author_date_unix_timestamp
+		issue_opened = self.findIssueOpened(correctiveCommit)
+		if issue_opened is not None:
+			bug_introduced_prior = issue_opened
+		correctiveFiles = correctiveCommit.fileschanged.split(",CAS_DELIMITER,")
+		for commit in self.allCommits:
+			if int(commit.author_date_unix_timestamp) < int(bug_introduced_prior):
+				commitFiles = commit.fileschanged.split(",CAS_DELIMITER,")
+				for commitFile in commitFiles:
+					if commitFile in correctiveFiles:
+						return commit
+		return -1 
+	def markBuggyCommits(self):
+		for correctiveCommit in self.correctiveCommits:
+			buggyCommit = self.searchForBuggyCommit(correctiveCommit)
+			if buggyCommit is not -1:
+				buggyCommit.contains_bug = True
+import sys
+from datetime import datetime, timedelta
+from orm.repository import *
+from orm.commit import *
+from analyzer.bugfinder import *
+from analyzer.metricsgenerator import *
+from analyzer.githubissuetracker import *
+from caslogging import logging
+from analyzer.notifier import *
+from config import config
+from analyzer.git_commit_linker import *
+from sqlalchemy import Date, cast 
+def analyze(repo_id):
+	session = Session()
+	repo_to_analyze = (session.query(Repository)
+				.filter (Repository.id == repo_id)
+				.all()
+				)
+	if len(repo_to_analyze) > 0:
+		analyzeRepo(repo_to_analyze[0],session)
+	else:
+		logging.info('Repo with id ' + repo_id_to_analyze + ' not found!')
+	session.close()
+def analyzeRepo(repository_to_analyze, session):
+	repo_name = repository_to_analyze.name
+	repo_id = repository_to_analyze.id
+	last_analysis_date = repository_to_analyze.analysis_date
+	repository_to_analyze.status = "Analyzing"
+	session.commit()
+	logging.info('Worker analyzing repository id ' + repo_id)
+	all_commits = (session.query(Commit)
+				.filter( Commit.repository_id == repo_id)
+				.order_by( Commit.author_date_unix_timestamp.desc())
+				.all()
+				)
+	corrective_commits = (session.query(Commit)
+				.filter( 
+					( Commit.fix == "True" ) &
+					( Commit.repository_id == repo_id ) &
+					( Commit.linked == False )
+				)
+				.order_by( Commit.author_date_unix_timestamp.asc() )
+				.all()
+				)
+	logging.info("Linking " + str(len(corrective_commits)) + " new corrective commits for repo " + repo_id)
+	try:
+		git_commit_linker = GitCommitLinker(repo_id)
+		git_commit_linker.linkCorrectiveCommits(corrective_commits, all_commits)
+	except Exception as e:
+		logging.exception("Got an exception linking bug fixing changes to bug inducing changes for repo " + repo_id)
+		repository_to_analyze.status = "Error"
+		session.commit() 
+		raise
+	if repository_to_analyze.status != "Error":
+		repository_to_analyze.status = "In Queue to Build Model"
+		session.commit()
+import csv
+import os
+from orm.glmcoefficients import * 
+from db import *	
+import math
+from caslogging import logging
+class LinearRegressionModel:
+  def __init__(self, metrics, repo_id, testingCommits):
+    self.metrics = metrics
+    self.repo_id = repo_id
+    self.sig_threshold = 0.05
+    self.data = None 
+    self.commits = testingCommits
+  def buildModel(self):
+    self._buildDataSet()
+    self._buildModelIncrementally()
+  def _buildDataSet(self):
+    current_dir = os.path.dirname(__file__)
+    dir_of_datasets = current_dir + "/datasets/"
+    num_buggy = getattr(self.metrics, "num_buggy")
+    num_nonbuggy = getattr(self.metrics, "num_nonbuggy")
+    with open(dir_of_datasets + self.repo_id + ".csv", "w") as file:
+      csv_writer = csv.writer(file, dialect="excel")
+      csv_writer.writerow(["ns","nd","nf","entrophy","la","ld","lt","ndev","age","nuc","exp","rexp","sexp","is_buggy"])
+      for buggy_index in range(0,num_buggy):
+        ns = self.metrics.ns_buggy[buggy_index]
+        nd = self.metrics.nd_buggy[buggy_index]
+        nf = self.metrics.nf_buggy[buggy_index]
+        entrophy = self.metrics.entrophy_buggy[buggy_index]
+        la = self.metrics.la_buggy[buggy_index]
+        ld = self.metrics.ld_buggy[buggy_index]
+        lt = self.metrics.lt_buggy[buggy_index]
+        ndev = self.metrics.ndev_buggy[buggy_index]
+        age = self.metrics.age_buggy[buggy_index]
+        nuc = self.metrics.nuc_buggy[buggy_index]
+        exp = self.metrics.exp_buggy[buggy_index]
+        rexp = self.metrics.rexp_buggy[buggy_index]
+        sexp = self.metrics.sexp_buggy[buggy_index]
+        csv_writer.writerow([ns,nd,nf,entrophy,la,ld,lt,ndev,age,nuc,exp,rexp,sexp,True])
+      for nonbuggy_index in range(0,num_nonbuggy):
+        ns = self.metrics.ns_nonbuggy[nonbuggy_index]
+        nd = self.metrics.nd_nonbuggy[nonbuggy_index]
+        nf = self.metrics.nf_nonbuggy[nonbuggy_index]
+        entrophy = self.metrics.entrophy_nonbuggy[nonbuggy_index]
+        la = self.metrics.la_nonbuggy[nonbuggy_index]
+        ld = self.metrics.ld_nonbuggy[nonbuggy_index]
+        lt = self.metrics.lt_nonbuggy[nonbuggy_index]
+        ndev = self.metrics.ndev_nonbuggy[nonbuggy_index]
+        age = self.metrics.age_nonbuggy[nonbuggy_index]
+        nuc = self.metrics.nuc_nonbuggy[nonbuggy_index]
+        exp = self.metrics.exp_nonbuggy[nonbuggy_index]
+        rexp = self.metrics.rexp_nonbuggy[nonbuggy_index]
+        sexp = self.metrics.sexp_nonbuggy[nonbuggy_index]
+        csv_writer.writerow([ns,nd,nf,entrophy,la,ld,lt,ndev,age,nuc,exp,rexp,sexp,False])
+  def _isMetricSignificant(self, formula_metrics, metric):
+    sig_column = 4
+    if len(formula_metrics) == 0:
+      formula = "is_buggy~" + metric
+      fit = self.stats.glm(formula, data=self.data, family="binomial")
+      summary = self.base.summary(fit)
+      try:
+        metric_sig = summary.rx2('coefficients').rx(2,sig_column)[0] 
+        if metric_sig <= self.sig_threshold:
+          return True
+        else:
+          return False
+      except:
+        return False
+    else:
+      num_metrics = len(formula_metrics)+2 
+      formula = "is_buggy~" + "+".join(formula_metrics) + "+" + metric
+      fit = self.stats.glm(formula, data=self.data, family="binomial")
+      summary = self.base.summary(fit)
+      try: 
+        for row in range(2,num_metrics+1):
+          metric_sig = summary.rx2('coefficients').rx(row,sig_column)[0]
+          if metric_sig > self.sig_threshold:
+            return False
+        return True 
+      except:
+        return False
+  def _buildModelIncrementally(self):
+    metrics_list = ["la","ld","lt","ns","nd","nf","ndev","age","nuc","exp","rexp","sexp","entrophy"]
+    formula_metrics = []
+    current_dir = os.path.dirname(__file__)
+    dir_of_datasets = current_dir + "/datasets/"
+    self.data = self.readcsv(dir_of_datasets + self.repo_id + ".csv", header=True, sep = ",")
+    for metric in metrics_list:
+      if self._isMetricSignificant(formula_metrics, metric):
+        formula_metrics.append(metric)
+    self._storeCoefficients(formula_metrics)
+    self.calculateCommitRiskyness(self.commits, formula_metrics)
+  def _getCoefficients(self, formula_coefs):
+    coef_dict = {} 
+    formula = "is_buggy~" + "+".join(formula_coefs)
+    fit = self.stats.glm(formula, data=self.data, family="binomial")
+    for coef in formula_coefs:
+      coef_dict[coef] = fit.rx2('coefficients').rx2(coef)[0]
+    return coef_dict
+  def _getInterceptValue(self, coefs):
+    formula = "is_buggy~" + "+".join(coefs)
+    fit = self.stats.glm(formula, data=self.data, family="binomial")
+    summary = self.base.summary(fit)
+    return summary.rx2('coefficients').rx(1)[0], summary.rx2('coefficients').rx(1,4)[0]
+  def _getCoefficientObject(self, coef_name, coef_value):
+    coef_object = ""
+    coef_object += '"' + str(coef_name) + '":"' + str(coef_value)
+    return coef_object + '",'
+  def _storeCoefficients(self, coefficient_names):
+    coefs = ""
+    coefs += '"repo":"' + str(self.repo_id) + '",'
+    if len(coefficient_names) == 0:
+      coefficient_dict = {}
+    else:
+      coefficient_dict = self._getCoefficients(coefficient_names)
+      intercept_value, intercept_pvalue = self._getInterceptValue(coefficient_names)
+      if intercept_pvalue <= self.sig_threshold:
+        intercept_sig = 1
+      else:
+        intercept_sig = 0
+      coefs += self._getCoefficientObject("intercept", intercept_value)
+      coefs += self._getCoefficientObject("intercept_sig", intercept_sig)
+    sig_coefs = [] 
+    all_coefs = ["ns", "nd", "nf", "entrophy", "la", "ld", "lt", "ndev", "age", "nuc", "exp", "rexp", "sexp"]
+    for coef_name, coef_value in coefficient_dict.items():
+      coefs += self._getCoefficientObject(coef_name, coef_value)
+      coefs += self._getCoefficientObject(coef_name + "_sig", 1) 
+      sig_coefs.append(coef_name)
+    for c in all_coefs:
+      if c not in sig_coefs:
+        coefs += self._getCoefficientObject(c, -1) 
+        coefs += self._getCoefficientObject(c + "_sig", 0)
+    coefs = coefs[:-1]
+    coefSession = Session()
+    allCoef = GlmCoefficients(json.loads('{' + coefs + '}'))
+    coefSession.merge(allCoef)
+    coefSession.commit()
+    coefSession.close()
+  def calculateCommitRiskyness(self, commits, coefficient_names):
+    if len(coefficient_names) == 0:
+      coefficient_dict = {}
+      model_available = False
+    else:
+      coefficient_dict = self._getCoefficients(coefficient_names)
+      model_available = True
+      intercept_value, intercept_pvalue = self._getInterceptValue(coefficient_names)
+    for commit in commits:
+      if model_available == False:
+        commit.glm_probability = -1
+      else:
+        coefs_sum = 0
+        for coef_name, coef_value in coefficient_dict.items():
+          coefs_sum += (coef_value * getattr(commit, coef_name))
+        try:
+          riskyness = 1/(1+ math.exp(-intercept_value-coefs_sum))
+        except OverflowError:
+          logging.error("Overflow error for repo " + self.repo_id)
+          logging.error("Calculating riskyness for " + commit.commit_hash)
+          logging.error("Sum of coefficients: " + str(coefs_sum))
+          logging.error("Coeffiecents: " + str(coefficient_dict))
+          riskyness = 0.01
+        commit.glm_probability = riskyness
